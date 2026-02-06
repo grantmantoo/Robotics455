@@ -1,9 +1,14 @@
+class Motor:
+    def __init__(self, maestro, channel, stop=1500):
+        self.maestro = maestro
+        self.channel = channel
+        self.stop = stop * 4
 
-class Motor():
-    def __init__(self, name):
-        self.name = name
-        self.speed = 0
+    def forward(self, speed=100):
+        self.maestro.setTarget(self.channel, (1500 + speed) * 4)
 
-    def set_speed(self, speed):
-        self.speed = speed
-        print(f"{self.name} motor speed set to {self.speed}")
+    def backward(self, speed=100):
+        self.maestro.setTarget(self.channel, (1500 - speed) * 4)
+
+    def stop_motor(self):
+        self.maestro.setTarget(self.channel, self.stop)
