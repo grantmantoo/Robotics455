@@ -1,0 +1,410 @@
+<!-- templates/index.html -->
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Robot Control</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 20px; }
+    .row { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+    .card { border: 1px solid #ccc; border-radius: 10px; padding: 12px; min-width: 280px; }
+    button { padding: 10px 14px; margin: 4px; }
+    input[type="range"] { width: 240px; }
+    .big { font-size: 16px; font-weight: 600; }
+    .status { margin-top: 10px; color: #333; }
+    code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
+
+    /* Joystick UI */
+    .joy-pad {
+      width: 220px;
+      height: 220px;
+      border: 3px solid #222;
+      border-radius: 50%;
+      position: relative;
+      margin-top: 10px;
+      user-select: none;
+      touch-action: none;
+    }
+    .joy-knob {
+      width: 26px;
+      height: 26px;
+      background: #111;
+      border-radius: 50%;
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    /* Text input styling */
+    .tts-input {
+      width: 240px;
+      padding: 10px;
+      margin: 4px;
+      border-radius: 8px;
+      border: 1px solid #bbb;
+    }
+  </style>
+</head>
+<body>
+  <h2>Robot Control (Local)</h2>
+
+  <div class="row">
+    <!-- Drive buttons + sliders -->
+    <div class="card">
+      <div class="big">Drive</div>
+      <div>
+        <button onclick="post('/api/forward', {speed: getSpeed()})">Forward</button>
+        <button onclick="post('/api/backward', {speed: getSpeed()})">Backward</button>
+      </div>
+      <div>
+        <button onclick="post('/api/turn_left', {speed: getSpeed()})">Turn Left</button>
+        <button onclick="post('/api/turn_right', {speed: getSpeed()})">Turn Right</button>
+      </div>
+      <div>
+        <button onclick="post('/api/stop', {})">STOP</button>
+        <button onclick="post('/api/center', {})">Center</button>
+      </div>
+
+      <div style="margin-top:10px;">
+        Speed (delta): <span id="speedVal">800</span>
+        <br/>
+        <input id="speed" type="range" min="800" max="1600" step="50" value="800"
+               oninput="speedVal.textContent=this.value" />
+      </div>
+
+      <div style="margin-top:10px;">
+        <div class="big">Manual Tank Drive</div>
+        Left: <span id="leftVal">0</span>
+        <br/>
+        <input id="left" type="range" min="-1600" max="1600" step="50" value="0"
+               oninput="leftVal.textContent=this.value" />
+        <br/>
+        Right: <span id="rightVal">0</span>
+        <br/>
+        <input id="right" type="range" min="-1600" max="1600" step="50" value="0"
+               oninput="rightVal.textContent=this.value" />
+        <br/>
+        <button onclick="tankDrive()">Send Tank Drive</button>
+        <button onclick="resetTank()">Reset Tank (0,0)</button>
+      </div>
+    </div>
+
+    <!-- Mouse joystick -->
+    <div class="card">
+      <div class="big">Mouse Joystick (Drive)</div>
+
+      <div id="joyPad" class="joy-pad">
+        <div id="joyKnob" class="joy-knob"></div>
+      </div>
+
+      <div style="margin-top:10px;">
+        X: <code id="joyX">0.00</code>
+        Y: <code id="joyY">0.00</code>
+        Left: <code id="joyL">0</code>
+        Right: <code id="joyR">0</code>
+      </div>
+
+      <div style="margin-top:10px;">
+        Max speed:
+        <input id="joyMax" type="range" min="800" max="1600" step="50" value="1200"
+               oninput="joyMaxVal.textContent=this.value" />
+        <span id="joyMaxVal">1200</span>
+      </div>
+
+      <div style="margin-top:10px;">
+        Deadzone:
+        <input id="joyDeadzone" type="range" min="0.00" max="0.30" step="0.01" value="0.10"
+               oninput="joyDzVal.textContent=this.value" />
+        <span id="joyDzVal">0.10</span>
+      </div>
+
+      <div style="margin-top:10px;">
+        <button onclick="centerJoystick()">Center Joystick</button>
+        <button onclick="post('/api/stop', {})">STOP</button>
+      </div>
+    </div>
+
+    <!-- Head pan -->
+    <div class="card">
+      <div class="big">Head Pan</div>
+      Value: <span id="panVal">5000</span>
+      <br/>
+      <input id="pan" type="range" min="2000" max="8000" step="50" value="5000"
+             oninput="panVal.textContent=this.value" />
+      <br/>
+      <button onclick="post('/api/head_pan', {value: getInt('pan')})">Send</button>
+      <button onclick="post('/api/head_pan', {value: 5000})">Center</button>
+    </div>
+
+    <!-- Head tilt -->
+    <div class="card">
+      <div class="big">Head Tilt</div>
+      Value: <span id="tiltVal">5000</span>
+      <br/>
+      <input id="tilt" type="range" min="2000" max="8000" step="50" value="5000"
+             oninput="tiltVal.textContent=this.value" />
+      <br/>
+      <button onclick="post('/api/head_tilt', {value: getInt('tilt')})">Send</button>
+      <button onclick="post('/api/head_tilt', {value: 5000})">Center</button>
+    </div>
+
+    <!-- Waist -->
+    <div class="card">
+      <div class="big">Waist</div>
+      Value: <span id="waistVal">5000</span>
+      <br/>
+      <input id="waist" type="range" min="2000" max="8000" step="50" value="5000"
+             oninput="waistVal.textContent=this.value" />
+      <br/>
+      <button onclick="post('/api/waist', {value: getInt('waist')})">Send</button>
+      <button onclick="post('/api/waist', {value: 5000})">Center</button>
+    </div>
+
+    <!-- Voice Output -->
+    <div class="card">
+      <div class="big">Voice Output</div>
+
+      <div style="margin-top:10px;">
+        <input id="ttsText" class="tts-input" type="text"
+               placeholder="Type something to say…" />
+        <button onclick="speakTyped()">Speak</button>
+      </div>
+
+      <div style="margin-top:10px;">
+        <button onclick="sayPreset('Hello, Hunter.')">“Hello, Hunter.”</button><br/>
+        <button onclick="sayPreset('Hunter is so cool.')">“Hunter is so cool.”</button><br/>
+        <button onclick="sayPreset('Please do not touch my wheels.')">“Please do not touch my wheels.”</button><br/>
+        <button onclick="sayPreset('Hunter is the greatest.')">“Hunter is the greatest.”</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="status">
+    Status: <code id="status">ready</code>
+  </div>
+
+<script>
+  async function post(url, body) {
+    try {
+      setStatus("sending " + url + " …");
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: " + data.error);
+      } else {
+        setStatus("ok: " + url);
+      }
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
+  function setStatus(msg) {
+    document.getElementById("status").textContent = msg;
+  }
+
+  function getInt(id) {
+    return parseInt(document.getElementById(id).value, 10);
+  }
+
+  function getSpeed() {
+    return getInt("speed");
+  }
+
+  function tankDrive() {
+    post("/api/drive", {left: getInt("left"), right: getInt("right")});
+  }
+
+  function resetTank() {
+    document.getElementById("left").value = 0;
+    document.getElementById("right").value = 0;
+    document.getElementById("leftVal").textContent = "0";
+    document.getElementById("rightVal").textContent = "0";
+    tankDrive();
+  }
+
+  // -------------
+  // Voice controls
+  // -------------
+  function speakTyped() {
+    const el = document.getElementById("ttsText");
+    const text = el.value.trim();
+    if (!text) {
+      setStatus("ERROR: enter text to speak");
+      return;
+    }
+    post("/api/speak_text", { text });
+  }
+
+  function sayPreset(text) {
+    post("/api/speak_text", { text });
+  }
+
+  // Press Enter in the text box to speak
+  document.addEventListener("keydown", (e) => {
+    const a = document.activeElement;
+    if (e.key === "Enter" && a && a.id === "ttsText") {
+      speakTyped();
+    }
+  });
+
+  // -------------------
+  // Mouse Joystick logic
+  // -------------------
+  const joyPad = document.getElementById("joyPad");
+  const joyKnob = document.getElementById("joyKnob");
+
+  const joyXEl = document.getElementById("joyX");
+  const joyYEl = document.getElementById("joyY");
+  const joyLEl = document.getElementById("joyL");
+  const joyREl = document.getElementById("joyR");
+
+  let joyActive = false;
+  let joyInterval = null;
+
+  // normalized joystick coords in [-1, 1]
+  let joyX = 0;
+  let joyY = 0;
+
+  function clamp(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v));
+  }
+
+  function applyDeadzone(v, dz) {
+    if (Math.abs(v) < dz) return 0;
+    const sign = v >= 0 ? 1 : -1;
+    const mag = (Math.abs(v) - dz) / (1 - dz);
+    return sign * mag;
+  }
+
+  function setKnobNormalized(x, y) {
+    // clamp to unit circle
+    const r = Math.sqrt(x*x + y*y);
+    if (r > 1) { x /= r; y /= r; }
+
+    joyX = x;
+    joyY = y;
+
+    const rect = joyPad.getBoundingClientRect();
+    const radius = rect.width / 2;
+    const maxOffset = radius - 16;
+
+    const px = x * maxOffset;
+    const py = -y * maxOffset; // +y up
+
+    joyKnob.style.left = (radius + px) + "px";
+    joyKnob.style.top  = (radius + py) + "px";
+
+    joyXEl.textContent = joyX.toFixed(2);
+    joyYEl.textContent = joyY.toFixed(2);
+  }
+
+  function centerJoystick() {
+    setKnobNormalized(0, 0);
+    post("/api/drive", {left: 0, right: 0});
+    joyLEl.textContent = "0";
+    joyREl.textContent = "0";
+  }
+
+  function computeAndSendDrive() {
+    const max = parseInt(document.getElementById("joyMax").value, 10);
+    const dz = parseFloat(document.getElementById("joyDeadzone").value);
+
+    let x = applyDeadzone(joyX, dz);
+    let y = applyDeadzone(joyY, dz);
+
+    // arcade mix -> tank
+    let left = y + x;
+    let right = y - x;
+
+    left = clamp(left, -1, 1);
+    right = clamp(right, -1, 1);
+
+    const leftCmd = Math.round(left * max);
+    const rightCmd = Math.round(right * max);
+
+    joyLEl.textContent = String(leftCmd);
+    joyREl.textContent = String(rightCmd);
+
+    post("/api/drive", {left: leftCmd, right: rightCmd});
+  }
+
+  function pointerToNormalized(evt) {
+    const rect = joyPad.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+
+    const dx = evt.clientX - cx;
+    const dy = evt.clientY - cy;
+
+    const radius = rect.width / 2;
+    const maxOffset = radius - 16;
+
+    let x = dx / maxOffset;
+    let y = -dy / maxOffset;
+
+    const r = Math.sqrt(x*x + y*y);
+    if (r > 1) { x /= r; y /= r; }
+
+    return {x, y};
+  }
+
+  function startJoystickLoop() {
+    if (joyInterval) return;
+    joyInterval = setInterval(computeAndSendDrive, 50); // 20 Hz
+  }
+
+  function stopJoystickLoop() {
+    if (!joyInterval) return;
+    clearInterval(joyInterval);
+    joyInterval = null;
+  }
+
+  joyPad.addEventListener("pointerdown", (evt) => {
+    joyActive = true;
+    joyPad.setPointerCapture(evt.pointerId);
+
+    const p = pointerToNormalized(evt);
+    setKnobNormalized(p.x, p.y);
+
+    startJoystickLoop();
+    computeAndSendDrive(); // send immediately
+  });
+
+  joyPad.addEventListener("pointermove", (evt) => {
+    if (!joyActive) return;
+    const p = pointerToNormalized(evt);
+    setKnobNormalized(p.x, p.y);
+  });
+
+  joyPad.addEventListener("pointerup", () => {
+    joyActive = false;
+    stopJoystickLoop();
+    centerJoystick();
+  });
+
+  joyPad.addEventListener("pointercancel", () => {
+    joyActive = false;
+    stopJoystickLoop();
+    centerJoystick();
+  });
+
+  // Stop if you tab away (safety)
+  window.addEventListener("blur", () => {
+    if (joyActive) {
+      joyActive = false;
+      stopJoystickLoop();
+      centerJoystick();
+    }
+  });
+
+  // Center at load
+  centerJoystick();
+</script>
+</body>
+</html>
