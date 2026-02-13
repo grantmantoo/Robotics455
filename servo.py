@@ -4,11 +4,14 @@ class Servo:
         self.channel = channel
         self.min = min_val
         self.max = max_val
-        self.center_val = center_val
+        self.center = center_val
 
-        # enforce in maestro.py (expects quarter-microseconds style numbers)
         maestro.setRange(channel, self.min, self.max)
-        print(f"[INIT] Servo ch{self.channel} range=({self.min},{self.max}) center={self.center_val}")
+        print(
+            f"[INIT] Servo ch{self.channel} "
+            f"range=({self.min},{self.max}) "
+            f"center={self.center}"
+        )
 
     def move(self, value):
         raw = value
@@ -21,6 +24,6 @@ class Servo:
         print(f"[SERVO] ch{self.channel} -> {value}{note}")
         self.maestro.setTarget(self.channel, value)
 
-    def center(self):
-        print(f"[SERVO] ch{self.channel} CENTER -> {self.center_val}")
-        self.move(self.center_val)
+    def center_servo(self):
+        print(f"[SERVO] ch{self.channel} CENTER -> {self.center}")
+        self.move(self.center)
