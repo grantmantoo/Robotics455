@@ -6,3 +6,8 @@ class Camera():
     def set_angle(self, angle):
         self.angle = angle
         print(f"{self.name} camera angle set to {self.angle}")
+
+
+    # -------------------------
+    # To Be Implemented
+    # -------------------------

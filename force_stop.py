@@ -3,7 +3,7 @@ import time
 
 PORT = "/dev/ttyACM0"
 DEVICE = 0x0C
-NEUTRAL = 5000
+NEUTRAL = 6000
 
 LEFT = 0
 RIGHT = 1
