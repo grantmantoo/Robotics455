@@ -2,7 +2,6 @@ import pyttsx3
 
 engine = pyttsx3.init()
 
-# Optional tuning (safe defaults)
 engine.setProperty('rate', 170)
 engine.setProperty('volume', 1.0)
 

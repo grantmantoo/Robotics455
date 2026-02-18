@@ -7,3 +7,8 @@ class Sensor:
     def read_value(self):
         print(f"[SENSOR] {self.name} value = {self.value}")
         return self.value
+
+
+# -------------------------
+# To Be Implemented
+# -------------------------

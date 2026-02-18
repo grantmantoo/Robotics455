@@ -13,8 +13,8 @@ class Motor:
     ):
         """
         forward_sign:
-          +1 -> value ABOVE neutral moves robot forward
-          -1 -> value BELOW neutral moves robot forward
+            +1 -> value ABOVE neutral moves robot forward
+            1 -> value BELOW neutral moves robot forward
         """
         self.maestro = maestro
         self.channel = channel
