@@ -204,6 +204,22 @@
     }
   }
 
+  // ===============================
+  // HEARTBEAT (network dead-man switch)
+  // ===============================
+  function startHeartbeat() {
+    setInterval(() => {
+      fetch("/api/heartbeat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+      }).catch(() => {
+        // If this fails, the server watchdog will trigger force_stop.py
+      });
+    }, 250); // 4 times per second
+  }
+  startHeartbeat();
+
   function setStatus(msg) {
     document.getElementById("status").textContent = msg;
   }
