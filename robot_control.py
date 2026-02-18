@@ -31,14 +31,14 @@ class RobotControl:
         self.stop()  # start safe
 
     # -------------------------
-    # REQUIRED: STOP / neutral
+    # STOP / neutral
     # -------------------------
     def stop(self):
         print("[CTRL] STOP/NEUTRAL")
         self.robot.stop()
 
     # -------------------------
-    # REQUIRED: Driving
+    # Driving
     # -------------------------
     def drive(self, left_speed, right_speed):
         """
@@ -89,7 +89,7 @@ class RobotControl:
         self.drive(speed, -speed)
 
     # -------------------------
-    # REQUIRED: Head + Waist
+    # Head + Waist
     # -------------------------
     def head_pan(self, value):
         value = int(clamp(value, self.HEAD_PAN_MIN, self.HEAD_PAN_MAX))
