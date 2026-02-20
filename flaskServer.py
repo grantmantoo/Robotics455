@@ -1,5 +1,7 @@
 from flask import Flask, request, jsonify, render_template
 from robot_control import RobotControl
+from dialog_engine import DialogEngine
+from action_runner import ActionRunner
 
 import logging
 from werkzeug.serving import WSGIRequestHandler
@@ -8,6 +10,7 @@ import subprocess
 import re
 import time
 import os
+import argparse
 
 class QuietHandler(WSGIRequestHandler):
     def log_request(self, code='-', size='-'):
@@ -20,6 +23,39 @@ app = Flask(__name__)
 
 # One shared controller instance for the server
 ctrl = RobotControl(port="/dev/ttyACM0", device=0x0C)
+dialog_lock = threading.Lock()
+dialog_engine = None
+action_runner = None
+dialog_state_override = None
+
+
+def set_dialog_state(value: str):
+    global dialog_state_override
+    with dialog_lock:
+        dialog_state_override = value
+
+
+def get_dialog_state() -> str:
+    with dialog_lock:
+        if dialog_state_override is not None:
+            return dialog_state_override
+        if dialog_engine is None:
+            return "BOOT"
+        return dialog_engine.state
+
+
+def configure_dialog_engine(script_path: str, seed: int | None):
+    global dialog_engine, action_runner, dialog_state_override
+    if action_runner is not None:
+        action_runner.interrupt()
+    dialog_engine = DialogEngine.from_file(script_path, seed=seed)
+    for err in dialog_engine.errors:
+        print(f"[DIALOG PARSE] {err}")
+    if dialog_engine.has_fatal_errors():
+        print("[DIALOG] fatal errors found; dialog engine will refuse to run")
+    action_runner = ActionRunner(ctrl, on_state_change=set_dialog_state)
+    dialog_state_override = None
+    print(f"[DIALOG] loaded script={script_path} seed={seed}")
 
 def bad(msg, code=400):
     return jsonify({"ok": False, "error": msg}), code
@@ -55,6 +91,10 @@ def run_force_stop_async(reason: str):
         global _force_stop_running
         try:
             print(f"[WATCHDOG] FORCE STOP triggered: {reason}")
+            if action_runner is not None:
+                action_runner.interrupt()
+            if dialog_engine is not None:
+                dialog_engine.reset_to_idle("watchdog force stop")
 
             # Prefer your dedicated script (exactly what you asked for)
             script_path = os.path.join(os.path.dirname(__file__), "force_stop.py")
@@ -111,8 +151,15 @@ def sanitize_tts(text: str) -> str:
 
 def speak_async(text: str):
     def run():
-        subprocess.run(["espeak-ng", "-s", "165", "-v", "en-us", text], check=False)
+        try:
+            subprocess.run(["espeak-ng", "-s", "165", "-v", "en-us", text], check=False)
+        except FileNotFoundError:
+            print(f"[TTS WARN] espeak-ng not installed; cannot speak: {text}")
     threading.Thread(target=run, daemon=True).start()
+
+
+DEFAULT_DIALOG_SCRIPT = os.path.join(os.path.dirname(__file__), "testDialogFileForPractice.txt")
+configure_dialog_engine(DEFAULT_DIALOG_SCRIPT, seed=None)
 
 
 @app.route("/")
@@ -133,6 +180,10 @@ def api_heartbeat():
 # Optional: manual “panic button” endpoint (handy for testing)
 @app.route("/api/force_stop", methods=["POST"])
 def api_force_stop():
+    if action_runner is not None:
+        action_runner.interrupt()
+    if dialog_engine is not None:
+        dialog_engine.reset_to_idle("manual force stop")
     run_force_stop_async("manual /api/force_stop")
     return jsonify({"ok": True})
 
@@ -235,6 +286,10 @@ def api_turn_right():
 def api_stop():
     touch_heartbeat()
     try:
+        if action_runner is not None:
+            action_runner.interrupt()
+        if dialog_engine is not None:
+            dialog_engine.reset_to_idle("manual stop")
         ctrl.stop()
     except Exception as e:
         run_force_stop_async(f"stop exception: {e}")
@@ -338,8 +393,89 @@ def api_speak_text():
     return jsonify({"ok": True, "text": text})
 
 
+@app.route("/api/dialog_state", methods=["GET"])
+def api_dialog_state():
+    if dialog_engine is None:
+        return jsonify({"ok": False, "error": "dialog engine not configured"}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "state": get_dialog_state(),
+            "scope_depth": dialog_engine.current_scope_depth(),
+            "unmatched_in_scope": dialog_engine.unmatched_in_scope,
+            "fatal_errors": dialog_engine.has_fatal_errors(),
+            "error_count": len(dialog_engine.errors),
+        }
+    )
+
+
+@app.route("/api/dialog_input", methods=["POST"])
+def api_dialog_input():
+    touch_heartbeat()
+    if dialog_engine is None:
+        return bad("dialog engine not configured", code=500)
+
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+    if not isinstance(text, str):
+        return bad("text must be a string")
+    text = sanitize_tts(text)
+    if not text:
+        return bad("text is empty")
+
+    with dialog_lock:
+        result = dialog_engine.handle_input(text)
+
+    if not result.get("ok", False):
+        return jsonify(result), 400
+
+    if result.get("interrupt", False):
+        if action_runner is not None:
+            action_runner.interrupt()
+        try:
+            ctrl.stop()
+        except Exception as ex:
+            print(f"[DIALOG] stop failed on interrupt: {ex}")
+
+    speak_text = result.get("speak_text", "")
+    if isinstance(speak_text, str) and speak_text:
+        speak_async(speak_text)
+
+    actions = result.get("actions", [])
+    if isinstance(actions, list) and actions and action_runner is not None:
+        action_runner.enqueue(actions)
+
+    return jsonify(
+        {
+            "ok": True,
+            "input": text,
+            "matched": result.get("matched", False),
+            "reply": speak_text,
+            "actions": actions,
+            "state": get_dialog_state(),
+            "scope_depth": dialog_engine.current_scope_depth(),
+        }
+    )
+
+
 if __name__ == "__main__":
-    PORT = 5000
+    parser = argparse.ArgumentParser(description="CSCI 455 Robot Flask Server + Dialog Engine")
+    parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument(
+        "--dialog-script",
+        default=os.path.join(os.path.dirname(__file__), "testDialogFileForPractice.txt"),
+        help="Path to dialog script file",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for deterministic dialog output choices",
+    )
+    args = parser.parse_args()
+
+    configure_dialog_engine(args.dialog_script, args.seed)
+    PORT = args.port
     print(f"[FLASK] starting on 0.0.0.0:{PORT}")
     print(f"[FLASK] open http://<robot-ip>:{PORT}/ from your laptop")
     app.run(host="0.0.0.0", port=PORT, debug=False, request_handler=QuietHandler)

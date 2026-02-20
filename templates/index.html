@@ -44,6 +44,16 @@
       border-radius: 8px;
       border: 1px solid #bbb;
     }
+    .dialog-output {
+      margin-top: 8px;
+      padding: 10px;
+      min-height: 80px;
+      border: 1px solid #bbb;
+      border-radius: 8px;
+      background: #f7f7f7;
+      white-space: pre-wrap;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
@@ -178,6 +188,21 @@
         <button onclick="sayPreset('Hunter is the greatest.')">“Hunter is the greatest.”</button>
       </div>
     </div>
+
+    <!-- Dialog Engine -->
+    <div class="card">
+      <div class="big">Dialog Engine (Project 2)</div>
+      <div style="margin-top:10px;">
+        <input id="dialogInput" class="tts-input" type="text"
+               placeholder="Type user input for dialog script..." />
+        <button onclick="sendDialog()">Send</button>
+      </div>
+      <div style="margin-top:10px;">
+        <button onclick="post('/api/stop', {})">Global STOP</button>
+        <button onclick="refreshDialogState()">Refresh State</button>
+      </div>
+      <div id="dialogOutput" class="dialog-output">No dialog input yet.</div>
+    </div>
   </div>
 
   <div class="status">
@@ -261,11 +286,67 @@
     post("/api/speak_text", { text });
   }
 
+  async function sendDialog() {
+    const el = document.getElementById("dialogInput");
+    const text = el.value.trim();
+    if (!text) {
+      setStatus("ERROR: enter dialog input text");
+      return;
+    }
+    try {
+      setStatus("sending /api/dialog_input ...");
+      const res = await fetch("/api/dialog_input", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ text })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: " + (data.error || "dialog failed"));
+        return;
+      }
+      setStatus("ok: /api/dialog_input");
+      const out =
+        "Input: " + data.input + "\n" +
+        "Matched: " + data.matched + "\n" +
+        "Reply: " + (data.reply || "(none)") + "\n" +
+        "Actions: " + ((data.actions || []).join(", ") || "(none)") + "\n" +
+        "State: " + data.state + " | Scope depth: " + data.scope_depth;
+      document.getElementById("dialogOutput").textContent = out;
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
+  async function refreshDialogState() {
+    try {
+      const res = await fetch("/api/dialog_state");
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: dialog state failed");
+        return;
+      }
+      const out =
+        "State: " + data.state + "\n" +
+        "Scope depth: " + data.scope_depth + "\n" +
+        "Unmatched in scope: " + data.unmatched_in_scope + "\n" +
+        "Fatal errors: " + data.fatal_errors + "\n" +
+        "Parse errors: " + data.error_count;
+      document.getElementById("dialogOutput").textContent = out;
+      setStatus("ok: /api/dialog_state");
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
   // Press Enter in the text box to speak
   document.addEventListener("keydown", (e) => {
     const a = document.activeElement;
     if (e.key === "Enter" && a && a.id === "ttsText") {
       speakTyped();
+    }
+    if (e.key === "Enter" && a && a.id === "dialogInput") {
+      sendDialog();
     }
   });
 

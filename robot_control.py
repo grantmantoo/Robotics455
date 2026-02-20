@@ -1,5 +1,8 @@
 from maestro import Controller
 from robot import Robot
+from servo import Servo
+import os
+import time
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
@@ -27,6 +30,16 @@ class RobotControl:
         # Drive “speed” is delta from 6000; you said >= 800 moves
         self.DRIVE_MIN = 800
         self.DRIVE_MAX = 1600  # safety cap
+
+        # Optional shoulder servo (set ROBOT_ARM_CHANNEL if you have a dedicated arm servo).
+        self.arm_servo = None
+        arm_ch = os.getenv("ROBOT_ARM_CHANNEL")
+        if arm_ch is not None:
+            try:
+                self.arm_servo = Servo(self.maestro, int(arm_ch))
+                print(f"[CTRL] arm servo enabled on channel {arm_ch}")
+            except Exception as ex:
+                print(f"[CTRL WARN] arm servo init failed on channel {arm_ch}: {ex}")
 
         self.stop()  # start safe
 
@@ -105,6 +118,41 @@ class RobotControl:
         value = int(clamp(value, self.WAIST_MIN, self.WAIST_MAX))
         print(f"[CTRL] waist -> {value}")
         self.robot.waist.move(value)
+
+    # -------------------------
+    # Project 2 action primitive
+    # -------------------------
+    def arm_raise_sequence(self, deadline=None, cancel_event=None):
+        """
+        Raise and lower arm pose.
+        If a dedicated arm servo channel is unavailable, use waist as visible fallback.
+        """
+        def should_stop():
+            if cancel_event is not None and cancel_event.is_set():
+                return True
+            if deadline is not None and time.time() > deadline:
+                return True
+            return False
+
+        if should_stop():
+            return
+
+        if self.arm_servo is not None:
+            self.arm_servo.move(7000)
+            time.sleep(0.45)
+            if should_stop():
+                return
+            self.arm_servo.move(5000)
+            time.sleep(0.2)
+            return
+
+        # Fallback pose so the action is still visible in demos.
+        self.waist(6200)
+        time.sleep(0.45)
+        if should_stop():
+            return
+        self.waist(5000)
+        time.sleep(0.2)
 
     # -------------------------
     # Cleanup
