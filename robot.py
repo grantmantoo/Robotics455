@@ -26,6 +26,23 @@ class Robot:
         self.waist     = Servo(maestro, 3)
         self.head_tilt = Servo(maestro, 4)
 
+        # Arms
+        # Right arm
+        self.right_shoulder_ud = Servo(maestro, 5)
+        self.right_shoulder_yaw = Servo(maestro, 6)
+        self.right_elbow_ud = Servo(maestro, 7)
+        self.right_wrist_ud = Servo(maestro, 8)
+        self.right_wrist_rot = Servo(maestro, 9)
+        self.right_hand_pinch = Servo(maestro, 10)
+
+        # Left arm
+        self.left_wrist_rot = Servo(maestro, 11)
+        self.left_shoulder_ud = Servo(maestro, 12)
+        self.left_shoulder_yaw = Servo(maestro, 13)
+        self.left_elbow_ud = Servo(maestro, 14)
+        self.left_wrist_ud = Servo(maestro, 15)
+        self.left_hand_pinch = Servo(maestro, 16)
+
         print("[INIT] Robot ready")
 
     # -------- Drive --------

@@ -1,7 +1,5 @@
 from maestro import Controller
 from robot import Robot
-from servo import Servo
-import os
 import time
 
 def clamp(x, lo, hi):
@@ -30,16 +28,6 @@ class RobotControl:
         # Drive “speed” is delta from 6000; you said >= 800 moves
         self.DRIVE_MIN = 800
         self.DRIVE_MAX = 1600  # safety cap
-
-        # Optional shoulder servo (set ROBOT_ARM_CHANNEL if you have a dedicated arm servo).
-        self.arm_servo = None
-        arm_ch = os.getenv("ROBOT_ARM_CHANNEL")
-        if arm_ch is not None:
-            try:
-                self.arm_servo = Servo(self.maestro, int(arm_ch))
-                print(f"[CTRL] arm servo enabled on channel {arm_ch}")
-            except Exception as ex:
-                print(f"[CTRL WARN] arm servo init failed on channel {arm_ch}: {ex}")
 
         self.stop()  # start safe
 
@@ -124,8 +112,8 @@ class RobotControl:
     # -------------------------
     def arm_raise_sequence(self, deadline=None, cancel_event=None):
         """
-        Raise and lower arm pose.
-        If a dedicated arm servo channel is unavailable, use waist as visible fallback.
+        Multi-joint arm pose for Project 2.
+        Uses shoulders + elbows + wrists + hands for a more visible action.
         """
         def should_stop():
             if cancel_event is not None and cancel_event.is_set():
@@ -134,16 +122,52 @@ class RobotControl:
                 return True
             return False
 
+        def move_if_exists(name, value):
+            servo = getattr(self.robot, name, None)
+            if servo is not None:
+                servo.move(value)
+                return True
+            return False
+
         if should_stop():
             return
 
-        if self.arm_servo is not None:
-            self.arm_servo.move(7000)
-            time.sleep(0.45)
+        moved_any = False
+        # Phase 1: raise shoulders and elbows.
+        moved_any |= move_if_exists("right_shoulder_ud", 6900)
+        moved_any |= move_if_exists("left_shoulder_ud", 6900)
+        moved_any |= move_if_exists("right_elbow_ud", 6400)
+        moved_any |= move_if_exists("left_elbow_ud", 6400)
+        moved_any |= move_if_exists("right_shoulder_yaw", 6200)
+        moved_any |= move_if_exists("left_shoulder_yaw", 3800)
+
+        # Phase 2: wrist and hand flourish.
+        moved_any |= move_if_exists("right_wrist_ud", 5600)
+        moved_any |= move_if_exists("left_wrist_ud", 5600)
+        moved_any |= move_if_exists("right_wrist_rot", 6200)
+        moved_any |= move_if_exists("left_wrist_rot", 3800)
+        moved_any |= move_if_exists("right_hand_pinch", 5600)
+        moved_any |= move_if_exists("left_hand_pinch", 5600)
+
+        if moved_any:
+            time.sleep(0.55)
             if should_stop():
                 return
-            self.arm_servo.move(5000)
-            time.sleep(0.2)
+
+            # Return to neutral.
+            move_if_exists("right_shoulder_ud", 5000)
+            move_if_exists("left_shoulder_ud", 5000)
+            move_if_exists("right_elbow_ud", 5000)
+            move_if_exists("left_elbow_ud", 5000)
+            move_if_exists("right_shoulder_yaw", 5000)
+            move_if_exists("left_shoulder_yaw", 5000)
+            move_if_exists("right_wrist_ud", 5000)
+            move_if_exists("left_wrist_ud", 5000)
+            move_if_exists("right_wrist_rot", 5000)
+            move_if_exists("left_wrist_rot", 5000)
+            move_if_exists("right_hand_pinch", 5000)
+            move_if_exists("left_hand_pinch", 5000)
+            time.sleep(0.25)
             return
 
         # Fallback pose so the action is still visible in demos.
