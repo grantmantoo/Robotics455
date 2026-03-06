@@ -107,6 +107,59 @@ class RobotControl:
         print(f"[CTRL] waist -> {value}")
         self.robot.waist.move(value)
 
+    def center_pose(self):
+        self.stop()
+        self.head_pan(self.robot.servo_neutral("head_pan"))
+        self.head_tilt(self.robot.servo_neutral("head_tilt"))
+        self.waist(self.robot.servo_neutral("waist"))
+
+    # -------------------------
+    # Arm joints
+    # -------------------------
+    def _arm_move(self, attr_name, label, value):
+        value = int(clamp(value, 2000, 8000))
+        servo = getattr(self.robot, attr_name, None)
+        if servo is None:
+            raise ValueError(f"{label} servo is not configured")
+        print(f"[CTRL] {label} -> {value}")
+        servo.move(value)
+
+    def right_shoulder_ud(self, value):
+        self._arm_move("right_shoulder_ud", "right_shoulder_ud", value)
+
+    def right_shoulder_yaw(self, value):
+        self._arm_move("right_shoulder_yaw", "right_shoulder_yaw", value)
+
+    def right_elbow_ud(self, value):
+        self._arm_move("right_elbow_ud", "right_elbow_ud", value)
+
+    def right_wrist_ud(self, value):
+        self._arm_move("right_wrist_ud", "right_wrist_ud", value)
+
+    def right_wrist_rot(self, value):
+        self._arm_move("right_wrist_rot", "right_wrist_rot", value)
+
+    def right_hand_pinch(self, value):
+        self._arm_move("right_hand_pinch", "right_hand_pinch", value)
+
+    def left_wrist_rot(self, value):
+        self._arm_move("left_wrist_rot", "left_wrist_rot", value)
+
+    def left_shoulder_ud(self, value):
+        self._arm_move("left_shoulder_ud", "left_shoulder_ud", value)
+
+    def left_shoulder_yaw(self, value):
+        self._arm_move("left_shoulder_yaw", "left_shoulder_yaw", value)
+
+    def left_elbow_ud(self, value):
+        self._arm_move("left_elbow_ud", "left_elbow_ud", value)
+
+    def left_wrist_ud(self, value):
+        self._arm_move("left_wrist_ud", "left_wrist_ud", value)
+
+    def left_hand_pinch(self, value):
+        self._arm_move("left_hand_pinch", "left_hand_pinch", value)
+
     # -------------------------
     # Project 2 action primitive
     # -------------------------
@@ -129,25 +182,32 @@ class RobotControl:
                 return True
             return False
 
+        def neutral(name):
+            return self.robot.servo_neutral(name)
+
+        def with_delta(name, delta):
+            return int(clamp(neutral(name) + delta, 2000, 8000))
+
         if should_stop():
             return
 
         moved_any = False
         # Phase 1: raise shoulders and elbows.
-        moved_any |= move_if_exists("right_shoulder_ud", 6900)
-        moved_any |= move_if_exists("left_shoulder_ud", 6900)
-        moved_any |= move_if_exists("right_elbow_ud", 6400)
-        moved_any |= move_if_exists("left_elbow_ud", 6400)
-        moved_any |= move_if_exists("right_shoulder_yaw", 6200)
-        moved_any |= move_if_exists("left_shoulder_yaw", 3800)
+        # Shoulder U/D and shoulder yaw are mirrored left/right by opposite deltas.
+        moved_any |= move_if_exists("right_shoulder_ud", with_delta("right_shoulder_ud", +1100))
+        moved_any |= move_if_exists("left_shoulder_ud", with_delta("left_shoulder_ud", -1100))
+        moved_any |= move_if_exists("right_elbow_ud", with_delta("right_elbow_ud", +900))
+        moved_any |= move_if_exists("left_elbow_ud", with_delta("left_elbow_ud", +900))
+        moved_any |= move_if_exists("right_shoulder_yaw", with_delta("right_shoulder_yaw", +600))
+        moved_any |= move_if_exists("left_shoulder_yaw", with_delta("left_shoulder_yaw", -600))
 
         # Phase 2: wrist and hand flourish.
-        moved_any |= move_if_exists("right_wrist_ud", 5600)
-        moved_any |= move_if_exists("left_wrist_ud", 5600)
-        moved_any |= move_if_exists("right_wrist_rot", 6200)
-        moved_any |= move_if_exists("left_wrist_rot", 3800)
-        moved_any |= move_if_exists("right_hand_pinch", 5600)
-        moved_any |= move_if_exists("left_hand_pinch", 5600)
+        moved_any |= move_if_exists("right_wrist_ud", with_delta("right_wrist_ud", -200))
+        moved_any |= move_if_exists("left_wrist_ud", with_delta("left_wrist_ud", -200))
+        moved_any |= move_if_exists("right_wrist_rot", with_delta("right_wrist_rot", +300))
+        moved_any |= move_if_exists("left_wrist_rot", with_delta("left_wrist_rot", -300))
+        moved_any |= move_if_exists("right_hand_pinch", with_delta("right_hand_pinch", +500))
+        moved_any |= move_if_exists("left_hand_pinch", with_delta("left_hand_pinch", +500))
 
         if moved_any:
             time.sleep(0.55)
@@ -155,18 +215,18 @@ class RobotControl:
                 return
 
             # Return to neutral.
-            move_if_exists("right_shoulder_ud", 5000)
-            move_if_exists("left_shoulder_ud", 5000)
-            move_if_exists("right_elbow_ud", 5000)
-            move_if_exists("left_elbow_ud", 5000)
-            move_if_exists("right_shoulder_yaw", 5000)
-            move_if_exists("left_shoulder_yaw", 5000)
-            move_if_exists("right_wrist_ud", 5000)
-            move_if_exists("left_wrist_ud", 5000)
-            move_if_exists("right_wrist_rot", 5000)
-            move_if_exists("left_wrist_rot", 5000)
-            move_if_exists("right_hand_pinch", 5000)
-            move_if_exists("left_hand_pinch", 5000)
+            move_if_exists("right_shoulder_ud", neutral("right_shoulder_ud"))
+            move_if_exists("left_shoulder_ud", neutral("left_shoulder_ud"))
+            move_if_exists("right_elbow_ud", neutral("right_elbow_ud"))
+            move_if_exists("left_elbow_ud", neutral("left_elbow_ud"))
+            move_if_exists("right_shoulder_yaw", neutral("right_shoulder_yaw"))
+            move_if_exists("left_shoulder_yaw", neutral("left_shoulder_yaw"))
+            move_if_exists("right_wrist_ud", neutral("right_wrist_ud"))
+            move_if_exists("left_wrist_ud", neutral("left_wrist_ud"))
+            move_if_exists("right_wrist_rot", neutral("right_wrist_rot"))
+            move_if_exists("left_wrist_rot", neutral("left_wrist_rot"))
+            move_if_exists("right_hand_pinch", neutral("right_hand_pinch"))
+            move_if_exists("left_hand_pinch", neutral("left_hand_pinch"))
             time.sleep(0.25)
             return
 
@@ -177,6 +237,34 @@ class RobotControl:
             return
         self.waist(5000)
         time.sleep(0.2)
+
+    def reset_arms_neutral(self):
+        self.robot.set_arms_neutral()
+
+    def test_arms_basic(self, hold_s=0.5):
+        """
+        Quick arm validation:
+        neutral -> open pose -> neutral.
+        """
+        print("[CTRL] test_arms_basic start")
+        self.reset_arms_neutral()
+        time.sleep(hold_s)
+
+        # Open visible pose.
+        self.robot.right_shoulder_ud.move(int(clamp(self.robot.servo_neutral("right_shoulder_ud") + 1100, 2000, 8000)))
+        self.robot.left_shoulder_ud.move(int(clamp(self.robot.servo_neutral("left_shoulder_ud") - 1100, 2000, 8000)))
+        self.robot.right_shoulder_yaw.move(int(clamp(self.robot.servo_neutral("right_shoulder_yaw") + 600, 2000, 8000)))
+        self.robot.left_shoulder_yaw.move(int(clamp(self.robot.servo_neutral("left_shoulder_yaw") - 600, 2000, 8000)))
+        self.robot.right_elbow_ud.move(int(clamp(self.robot.servo_neutral("right_elbow_ud") + 900, 2000, 8000)))
+        self.robot.left_elbow_ud.move(int(clamp(self.robot.servo_neutral("left_elbow_ud") + 900, 2000, 8000)))
+        self.robot.right_wrist_ud.move(int(clamp(self.robot.servo_neutral("right_wrist_ud") - 200, 2000, 8000)))
+        self.robot.left_wrist_ud.move(int(clamp(self.robot.servo_neutral("left_wrist_ud") - 200, 2000, 8000)))
+        self.robot.right_hand_pinch.move(int(clamp(self.robot.servo_neutral("right_hand_pinch") + 500, 2000, 8000)))
+        self.robot.left_hand_pinch.move(int(clamp(self.robot.servo_neutral("left_hand_pinch") + 500, 2000, 8000)))
+        time.sleep(hold_s)
+
+        self.reset_arms_neutral()
+        print("[CTRL] test_arms_basic done")
 
     # -------------------------
     # Cleanup

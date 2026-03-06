@@ -5,7 +5,7 @@ from typing import Callable, List, Optional
 
 
 class ActionRunner:
-    def __init__(self, ctrl, on_state_change: Optional[Callable[[str], None]] = None):
+    def __init__(self, ctrl, on_state_change: Optional[Callable[[Optional[str]], None]] = None):
         self.ctrl = ctrl
         self.on_state_change = on_state_change
         self.q: "queue.Queue[List[str]]" = queue.Queue()
@@ -32,7 +32,7 @@ class ActionRunner:
         except Exception as ex:
             print(f"[ACTION] stop failed during interrupt: {ex}")
 
-    def _set_state(self, value: str) -> None:
+    def _set_state(self, value: Optional[str]) -> None:
         if self.on_state_change:
             self.on_state_change(value)
 
@@ -61,24 +61,26 @@ class ActionRunner:
         self._set_state("EXEC_ACTIONS")
 
         if action == "head_yes":
-            self.ctrl.head_tilt(6400)
+            base = self.ctrl.robot.servo_neutral("head_tilt")
+            self.ctrl.head_tilt(min(8000, base + 900))
             if not self._sleep_with_cancel(0.4, deadline):
                 return
-            self.ctrl.head_tilt(4200)
+            self.ctrl.head_tilt(max(2000, base - 900))
             if not self._sleep_with_cancel(0.4, deadline):
                 return
-            self.ctrl.head_tilt(5000)
+            self.ctrl.head_tilt(base)
             self._sleep_with_cancel(0.2, deadline)
             return
 
         if action == "head_no":
-            self.ctrl.head_pan(6400)
+            base = self.ctrl.robot.servo_neutral("head_pan")
+            self.ctrl.head_pan(min(8000, base + 1400))
             if not self._sleep_with_cancel(0.35, deadline):
                 return
-            self.ctrl.head_pan(3600)
+            self.ctrl.head_pan(max(2000, base - 1400))
             if not self._sleep_with_cancel(0.45, deadline):
                 return
-            self.ctrl.head_pan(5000)
+            self.ctrl.head_pan(base)
             self._sleep_with_cancel(0.2, deadline)
             return
 
@@ -89,17 +91,28 @@ class ActionRunner:
         if action == "dance90":
             # Wheel deadman safety: always stop wheels on exit.
             try:
+                # Add waist dance motion during rotation.
+                self.ctrl.waist(2000)
+                if not self._sleep_with_cancel(0.2, deadline):
+                    return
                 self.ctrl.turn_left(1000)
                 if not self._sleep_with_cancel(0.6, deadline):
                     return
                 self.ctrl.stop()
                 if not self._sleep_with_cancel(0.15, deadline):
                     return
-                self.ctrl.turn_right(1000)
+                self.ctrl.waist(8000)
+                if not self._sleep_with_cancel(0.2, deadline):
+                    return
+                self.ctrl.turn_right(1300)
                 if not self._sleep_with_cancel(0.6, deadline):
+                    return
+                self.ctrl.waist(self.ctrl.robot.servo_neutral("waist"))
+                if not self._sleep_with_cancel(0.15, deadline):
                     return
             finally:
                 self.ctrl.stop()
+                self.ctrl.waist(self.ctrl.robot.servo_neutral("waist"))
 
     def _worker_loop(self) -> None:
         while True:
@@ -116,4 +129,5 @@ class ActionRunner:
                         self.ctrl.stop()
                     except Exception:
                         pass
-            self._set_state("IDLE")
+            # Clear override so state falls back to dialog engine state.
+            self._set_state(None)

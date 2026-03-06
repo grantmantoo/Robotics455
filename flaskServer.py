@@ -11,6 +11,7 @@ import re
 import time
 import os
 import argparse
+from typing import Optional
 
 class QuietHandler(WSGIRequestHandler):
     def log_request(self, code='-', size='-'):
@@ -29,7 +30,7 @@ action_runner = None
 dialog_state_override = None
 
 
-def set_dialog_state(value: str):
+def set_dialog_state(value: Optional[str]):
     global dialog_state_override
     with dialog_lock:
         dialog_state_override = value
@@ -301,10 +302,7 @@ def api_stop():
 def api_center():
     touch_heartbeat()
     try:
-        ctrl.stop()
-        ctrl.head_pan(5000)
-        ctrl.head_tilt(5000)
-        ctrl.waist(5000)
+        ctrl.center_pose()
     except Exception as e:
         run_force_stop_async(f"center exception: {e}")
         return bad(f"center failed: {e}", code=500)
@@ -369,6 +367,83 @@ def api_waist():
     return jsonify({"ok": True, "value": v})
 
 
+def _api_arm_joint(move_fn, joint_name):
+    touch_heartbeat()
+    data = request.get_json(silent=True) or {}
+    if "value" not in data:
+        return bad("Missing 'value'")
+    try:
+        v = int(data["value"])
+    except (ValueError, TypeError):
+        return bad("value must be int")
+    try:
+        move_fn(v)
+    except Exception as e:
+        run_force_stop_async(f"{joint_name} exception: {e}")
+        return bad(f"{joint_name} failed: {e}", code=500)
+    return jsonify({"ok": True, "joint": joint_name, "value": v})
+
+
+@app.route("/api/right_shoulder_ud", methods=["POST"])
+def api_right_shoulder_ud():
+    return _api_arm_joint(ctrl.right_shoulder_ud, "right_shoulder_ud")
+
+
+@app.route("/api/right_shoulder_yaw", methods=["POST"])
+def api_right_shoulder_yaw():
+    return _api_arm_joint(ctrl.right_shoulder_yaw, "right_shoulder_yaw")
+
+
+@app.route("/api/right_elbow_ud", methods=["POST"])
+def api_right_elbow_ud():
+    return _api_arm_joint(ctrl.right_elbow_ud, "right_elbow_ud")
+
+
+@app.route("/api/right_wrist_ud", methods=["POST"])
+def api_right_wrist_ud():
+    return _api_arm_joint(ctrl.right_wrist_ud, "right_wrist_ud")
+
+
+@app.route("/api/right_wrist_rot", methods=["POST"])
+def api_right_wrist_rot():
+    return _api_arm_joint(ctrl.right_wrist_rot, "right_wrist_rot")
+
+
+@app.route("/api/right_hand_pinch", methods=["POST"])
+def api_right_hand_pinch():
+    return _api_arm_joint(ctrl.right_hand_pinch, "right_hand_pinch")
+
+
+@app.route("/api/left_wrist_rot", methods=["POST"])
+def api_left_wrist_rot():
+    return _api_arm_joint(ctrl.left_wrist_rot, "left_wrist_rot")
+
+
+@app.route("/api/left_shoulder_ud", methods=["POST"])
+def api_left_shoulder_ud():
+    return _api_arm_joint(ctrl.left_shoulder_ud, "left_shoulder_ud")
+
+
+@app.route("/api/left_shoulder_yaw", methods=["POST"])
+def api_left_shoulder_yaw():
+    return _api_arm_joint(ctrl.left_shoulder_yaw, "left_shoulder_yaw")
+
+
+@app.route("/api/left_elbow_ud", methods=["POST"])
+def api_left_elbow_ud():
+    return _api_arm_joint(ctrl.left_elbow_ud, "left_elbow_ud")
+
+
+@app.route("/api/left_wrist_ud", methods=["POST"])
+def api_left_wrist_ud():
+    return _api_arm_joint(ctrl.left_wrist_ud, "left_wrist_ud")
+
+
+@app.route("/api/left_hand_pinch", methods=["POST"])
+def api_left_hand_pinch():
+    return _api_arm_joint(ctrl.left_hand_pinch, "left_hand_pinch")
+
+
 # =========================
 # VOICE / TTS API
 # =========================
@@ -415,6 +490,13 @@ def api_dialog_input():
     if dialog_engine is None:
         return bad("dialog engine not configured", code=500)
 
+    # Wheel deadman: any dialog input immediately stops wheel motion,
+    # even if wheels were started by manual drive controls.
+    try:
+        ctrl.stop()
+    except Exception as ex:
+        print(f"[DIALOG] deadman stop failed: {ex}")
+
     data = request.get_json(silent=True) or {}
     text = data.get("text", "")
     if not isinstance(text, str):
@@ -443,6 +525,8 @@ def api_dialog_input():
 
     actions = result.get("actions", [])
     if isinstance(actions, list) and actions and action_runner is not None:
+        # Set immediately so API/UI shows EXEC_ACTIONS without worker timing delay.
+        set_dialog_state("EXEC_ACTIONS")
         action_runner.enqueue(actions)
 
     return jsonify(

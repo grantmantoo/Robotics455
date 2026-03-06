@@ -1,0 +1,3 @@
+# only bad lines / subrules
+u1:(hello): hi
+~broken_definition [a b c]

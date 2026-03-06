@@ -7,6 +7,8 @@ from typing import Dict, List, Optional, Tuple
 PUNCT_RE = re.compile(r"[.,!?]")
 SPACE_RE = re.compile(r"\s+")
 VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+POS_VAR_RE = re.compile(r"\$(\d+)")
+ASSIGN_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$(\d+)")
 ACTION_RE = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>")
 RULE_RE = re.compile(r"^\s*u(\d*)\s*:\s*\((.*?)\)\s*:\s*(.+?)\s*$")
 DEF_RE = re.compile(r"^\s*~([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+?)\s*$")
@@ -192,6 +194,19 @@ class DialogEngine:
 
                 rule_match = RULE_RE.match(line)
                 if not rule_match:
+                    # More specific message for common malformed rule:
+                    # u:(pattern) output   (missing second colon before output)
+                    if re.match(r"^\s*u\d*\s*:\s*\(.*\)\s*[^:].*$", line):
+                        self.errors.append(
+                            ParseError(
+                                self.filename,
+                                line_no,
+                                "delimiter",
+                                "missing second colon delimiter: expected u:(pattern):output",
+                                fatal=False,
+                            )
+                        )
+                        continue
                     self.errors.append(
                         ParseError(
                             self.filename,
@@ -375,7 +390,7 @@ class DialogEngine:
         except re.error as ex:
             return None, [], f"regex compile error: {ex}"
 
-    def _render_output(self, text: str) -> str:
+    def _render_output(self, text: str, captures: Optional[List[str]] = None) -> str:
         # Expand [ ... ] choices in output randomly.
         rendered = text
         for _ in range(20):
@@ -401,6 +416,17 @@ class DialogEngine:
             return self.rng.choice(vals)
 
         rendered = def_re.sub(repl_def, rendered)
+
+        # Replace positional captures ($1, $2, ...).
+        cap_values = captures or []
+
+        def repl_pos(m: re.Match) -> str:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(cap_values):
+                return cap_values[idx]
+            return "I don't know"
+
+        rendered = POS_VAR_RE.sub(repl_pos, rendered)
 
         # Replace variables, unknown -> "I don't know"
         def repl_var(m: re.Match) -> str:
@@ -532,17 +558,32 @@ class DialogEngine:
         else:
             self.scope_stack = [rule]
 
-        # Variable capture heuristic:
-        # if pattern includes "_" and output references $name, map first capture -> first variable.
         _, capture_slots, _ = self._compile_pattern(rule.pattern)
+        captures: List[str] = []
         if capture_slots:
             captures = [g.strip() for g in match_obj.groups()]
+            # Support explicit assignments in output, e.g. $name=$1
+            for var_name, pos_str in ASSIGN_RE.findall(rule.output):
+                idx = int(pos_str) - 1
+                if 0 <= idx < len(captures):
+                    self.variables[var_name] = captures[idx]
+
+            # Backward-compatible heuristic: if output references $name and has capture, set first var.
             var_refs = VAR_RE.findall(rule.output)
             if captures and var_refs:
                 self.variables[var_refs[0]] = captures[0]
 
-        rendered = self._render_output(rule.output)
+        # Remove assignment directives from spoken rendering.
+        output_text = ASSIGN_RE.sub("", rule.output)
+        unknown_output_vars = [
+            name for name in VAR_RE.findall(output_text)
+            if not self.variables.get(name)
+        ]
+        rendered = self._render_output(output_text, captures=captures)
         spoken, actions = self._extract_actions(rendered)
+        if unknown_output_vars:
+            spoken = "I don't know"
+            print(f"[DIALOG] unknown variable(s) in output: {unknown_output_vars}")
         self._set_scope_state()
 
         print(f"[DIALOG] matched line={rule.line} level=u{rule.level} state={self.state}")

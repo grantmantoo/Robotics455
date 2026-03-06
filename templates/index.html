@@ -54,6 +54,11 @@
       white-space: pre-wrap;
       font-size: 14px;
     }
+    .joint-row {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px dashed #ccc;
+    }
   </style>
 </head>
 <body>
@@ -135,40 +140,139 @@
       </div>
     </div>
 
-    <!-- Head pan -->
+    <!-- Head + Waist -->
     <div class="card">
-      <div class="big">Head Pan</div>
-      Value: <span id="panVal">5000</span>
-      <br/>
-      <input id="pan" type="range" min="2000" max="8000" step="50" value="5000"
-             oninput="panVal.textContent=this.value" />
-      <br/>
-      <button onclick="post('/api/head_pan', {value: getInt('pan')})">Send</button>
-      <button onclick="post('/api/head_pan', {value: 5000})">Center</button>
+      <div class="big">Head + Waist</div>
+
+      <div class="joint-row">
+        Head Pan: <span id="panVal">5800</span><br/>
+        <input id="pan" type="range" min="2000" max="8000" step="50" value="5800"
+               oninput="panVal.textContent=this.value" /><br/>
+        <button onclick="post('/api/head_pan', {value: getInt('pan')})">Send</button>
+        <button onclick="post('/api/head_pan', {value: 5800})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Head Tilt: <span id="tiltVal">5500</span><br/>
+        <input id="tilt" type="range" min="2000" max="8000" step="50" value="5500"
+               oninput="tiltVal.textContent=this.value" /><br/>
+        <button onclick="post('/api/head_tilt', {value: getInt('tilt')})">Send</button>
+        <button onclick="post('/api/head_tilt', {value: 5500})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Waist: <span id="waistVal">5000</span><br/>
+        <input id="waist" type="range" min="2000" max="8000" step="50" value="5000"
+               oninput="waistVal.textContent=this.value" /><br/>
+        <button onclick="post('/api/waist', {value: getInt('waist')})">Send</button>
+        <button onclick="post('/api/waist', {value: 5000})">Neutral</button>
+      </div>
     </div>
 
-    <!-- Head tilt -->
+    <!-- Right Arm -->
     <div class="card">
-      <div class="big">Head Tilt</div>
-      Value: <span id="tiltVal">5000</span>
-      <br/>
-      <input id="tilt" type="range" min="2000" max="8000" step="50" value="5000"
-             oninput="tiltVal.textContent=this.value" />
-      <br/>
-      <button onclick="post('/api/head_tilt', {value: getInt('tilt')})">Send</button>
-      <button onclick="post('/api/head_tilt', {value: 5000})">Center</button>
+      <div class="big">Right Arm</div>
+
+      <div class="joint-row">
+        Shoulder U/D: <span id="rShoulderUdVal">4000</span><br/>
+        <input id="rShoulderUd" type="range" min="2000" max="8000" step="50" value="4000"
+               oninput="rShoulderUdVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/right_shoulder_ud', 'rShoulderUd')">Send</button>
+        <button onclick="post('/api/right_shoulder_ud', {value: 4000})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Shoulder Yaw: <span id="rShoulderYawVal">6000</span><br/>
+        <input id="rShoulderYaw" type="range" min="2000" max="8000" step="50" value="6000"
+               oninput="rShoulderYawVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/right_shoulder_yaw', 'rShoulderYaw')">Send</button>
+        <button onclick="post('/api/right_shoulder_yaw', {value: 6000})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Elbow U/D: <span id="rElbowUdVal">4500</span><br/>
+        <input id="rElbowUd" type="range" min="2000" max="8000" step="50" value="4500"
+               oninput="rElbowUdVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/right_elbow_ud', 'rElbowUd')">Send</button>
+        <button onclick="post('/api/right_elbow_ud', {value: 4500})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Wrist U/D: <span id="rWristUdVal">5800</span><br/>
+        <input id="rWristUd" type="range" min="2000" max="8000" step="50" value="5800"
+               oninput="rWristUdVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/right_wrist_ud', 'rWristUd')">Send</button>
+        <button onclick="post('/api/right_wrist_ud', {value: 5800})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Wrist Rotate: <span id="rWristRotVal">5900</span><br/>
+        <input id="rWristRot" type="range" min="2000" max="8000" step="50" value="5900"
+               oninput="rWristRotVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/right_wrist_rot', 'rWristRot')">Send</button>
+        <button onclick="post('/api/right_wrist_rot', {value: 5900})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Hand Pinch: <span id="rHandPinchVal">2000</span><br/>
+        <input id="rHandPinch" type="range" min="2000" max="8000" step="50" value="2000"
+               oninput="rHandPinchVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/right_hand_pinch', 'rHandPinch')">Send</button>
+        <button onclick="post('/api/right_hand_pinch', {value: 2000})">Neutral</button>
+      </div>
     </div>
 
-    <!-- Waist -->
+    <!-- Left Arm -->
     <div class="card">
-      <div class="big">Waist</div>
-      Value: <span id="waistVal">5000</span>
-      <br/>
-      <input id="waist" type="range" min="2000" max="8000" step="50" value="5000"
-             oninput="waistVal.textContent=this.value" />
-      <br/>
-      <button onclick="post('/api/waist', {value: getInt('waist')})">Send</button>
-      <button onclick="post('/api/waist', {value: 5000})">Center</button>
+      <div class="big">Left Arm</div>
+
+      <div class="joint-row">
+        Shoulder U/D: <span id="lShoulderUdVal">8000</span><br/>
+        <input id="lShoulderUd" type="range" min="2000" max="8000" step="50" value="8000"
+               oninput="lShoulderUdVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/left_shoulder_ud', 'lShoulderUd')">Send</button>
+        <button onclick="post('/api/left_shoulder_ud', {value: 8000})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Shoulder Yaw: <span id="lShoulderYawVal">6000</span><br/>
+        <input id="lShoulderYaw" type="range" min="2000" max="8000" step="50" value="6000"
+               oninput="lShoulderYawVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/left_shoulder_yaw', 'lShoulderYaw')">Send</button>
+        <button onclick="post('/api/left_shoulder_yaw', {value: 6000})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Elbow U/D: <span id="lElbowUdVal">4300</span><br/>
+        <input id="lElbowUd" type="range" min="2000" max="8000" step="50" value="4300"
+               oninput="lElbowUdVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/left_elbow_ud', 'lElbowUd')">Send</button>
+        <button onclick="post('/api/left_elbow_ud', {value: 4300})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Wrist U/D: <span id="lWristUdVal">6000</span><br/>
+        <input id="lWristUd" type="range" min="2000" max="8000" step="50" value="6000"
+               oninput="lWristUdVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/left_wrist_ud', 'lWristUd')">Send</button>
+        <button onclick="post('/api/left_wrist_ud', {value: 6000})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Wrist Rotate: <span id="lWristRotVal">5600</span><br/>
+        <input id="lWristRot" type="range" min="2000" max="8000" step="50" value="5600"
+               oninput="lWristRotVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/left_wrist_rot', 'lWristRot')">Send</button>
+        <button onclick="post('/api/left_wrist_rot', {value: 5600})">Neutral</button>
+      </div>
+
+      <div class="joint-row">
+        Hand Pinch: <span id="lHandPinchVal">2000</span><br/>
+        <input id="lHandPinch" type="range" min="2000" max="8000" step="50" value="2000"
+               oninput="lHandPinchVal.textContent=this.value" /><br/>
+        <button onclick="sendArm('/api/left_hand_pinch', 'lHandPinch')">Send</button>
+        <button onclick="post('/api/left_hand_pinch', {value: 2000})">Neutral</button>
+      </div>
     </div>
 
     <!-- Voice Output -->
@@ -255,6 +359,10 @@
 
   function getSpeed() {
     return getInt("speed");
+  }
+
+  function sendArm(endpoint, sliderId) {
+    post(endpoint, { value: getInt(sliderId) });
   }
 
   function tankDrive() {
