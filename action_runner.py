@@ -87,16 +87,40 @@ class ActionRunner:
             return
 
         if action == "dance90":
-            # Wheel deadman safety: always stop wheels on exit.
+
+            WAIST_CENTER = 5000
+            WAIST_LEFT   = 6500
+            WAIST_RIGHT  = 3500
             try:
+        # ---- LEFT SIDE ----
                 self.ctrl.turn_left(1000)
-                if not self._sleep_with_cancel(0.6, deadline):
+                if not self._sleep_with_cancel(0.35, deadline):
+                    return
+                self.ctrl.waist(WAIST_LEFT)
+                if not self._sleep_with_cancel(0.35, deadline):
                     return
                 self.ctrl.stop()
                 if not self._sleep_with_cancel(0.15, deadline):
                     return
+
+        # ---- RIGHT SIDE ----
                 self.ctrl.turn_right(1000)
-                if not self._sleep_with_cancel(0.6, deadline):
+                if not self._sleep_with_cancel(0.35, deadline):
+                    return
+                self.ctrl.waist(WAIST_RIGHT)
+                if not self._sleep_with_cancel(0.35, deadline):
+                    return
+                self.ctrl.stop()
+                if not self._sleep_with_cancel(0.15, deadline):
+                    return
+
+        # ---- CENTER ----
+                self.ctrl.waist(WAIST_CENTER)
+                if not self._sleep_with_cancel(0.3, deadline):
+                    return
+                    # counter the last right turn
+                self.ctrl.turn_left(1000)
+                if not self._sleep_with_cancel(0.35, deadline):
                     return
             finally:
                 self.ctrl.stop()

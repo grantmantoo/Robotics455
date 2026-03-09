@@ -111,6 +111,9 @@ class RobotControl:
     # Project 2 action primitive
     # -------------------------
     def arm_raise_sequence(self, deadline=None, cancel_event=None):
+
+        print("Available robot attributes:")
+        print(dir(self.robot))
         """
         Multi-joint arm pose for Project 2.
         Uses shoulders + elbows + wrists + hands for a more visible action.
@@ -159,8 +162,8 @@ class RobotControl:
             move_if_exists("left_shoulder_ud", 5000)
             move_if_exists("right_elbow_ud", 5000)
             move_if_exists("left_elbow_ud", 5000)
-            move_if_exists("right_shoulder_yaw", 5000)
-            move_if_exists("left_shoulder_yaw", 5000)
+            move_if_exists("right_shoulder_yaw", 6000)
+            move_if_exists("left_shoulder_yaw", 6000)
             move_if_exists("right_wrist_ud", 5000)
             move_if_exists("left_wrist_ud", 5000)
             move_if_exists("right_wrist_rot", 5000)
