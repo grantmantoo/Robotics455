@@ -30,7 +30,7 @@ class Motor:
             f"min_delta={self.min_delta}"
         )
 
-        # Arm / initialize (this STOPS your motors)
+        # Arm / initialize. May also stop motor 
         print(f"[MOTOR] ch{self.channel} ARM/STOP -> {self.neutral}")
         self.maestro.setTarget(self.channel, self.neutral)
         time.sleep(arm_time)

@@ -1,6 +1,8 @@
 from maestro import Controller
 import time
 
+#### THIS IS OUT OF DATE! USED ONLY TO CONFIRM STOP VALUE!!!!
+
 PORT = "/dev/ttyACM0"
 DEVICE = 0x0C
 
