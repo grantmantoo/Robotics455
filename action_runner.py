@@ -84,35 +84,86 @@ class ActionRunner:
             self._sleep_with_cancel(0.2, deadline)
             return
 
-        if action == "arm_raise":
-            self.ctrl.arm_raise_sequence(deadline=deadline, cancel_event=self.cancel_event)
-            return
+        # if action == "arm_raise":
+        #     self.ctrl.arm_raise_sequence(deadline=deadline, cancel_event=self.cancel_event)
+        #     return
 
-        if action == "dance90":
-            # Wheel deadman safety: always stop wheels on exit.
+        if action == "arm_raise":
             try:
-                # Add waist dance motion during rotation.
-                self.ctrl.waist(2000)
-                if not self._sleep_with_cancel(0.2, deadline):
-                    return
-                self.ctrl.turn_left(1000)
-                if not self._sleep_with_cancel(0.6, deadline):
-                    return
-                self.ctrl.stop()
-                if not self._sleep_with_cancel(0.15, deadline):
-                    return
-                self.ctrl.waist(8000)
-                if not self._sleep_with_cancel(0.2, deadline):
-                    return
-                self.ctrl.turn_right(1300)
-                if not self._sleep_with_cancel(0.6, deadline):
-                    return
-                self.ctrl.waist(self.ctrl.robot.servo_neutral("waist"))
-                if not self._sleep_with_cancel(0.15, deadline):
+                self.ctrl.right_shoulder_ud(7000)
+                self.ctrl.right_elbow_ud(7000)
+                if not self._sleep_with_cancel(0.5, deadline):
                     return
             finally:
-                self.ctrl.stop()
-                self.ctrl.waist(self.ctrl.robot.servo_neutral("waist"))
+                self.ctrl.right_shoulder_ud(self.ctrl.robot.servo_neutral("right_shoulder_ud"))
+                self.ctrl.right_elbow_ud(self.ctrl.robot.servo_neutral("right_elbow_ud"))
+            self._sleep_with_cancel(0.2, deadline)
+            return
+
+        # if action == "dance90":
+        #     # Wheel deadman safety: always stop wheels on exit.
+        #     try:
+        #         # Add waist dance motion during rotation.
+        #         self.ctrl.waist(2000)
+        #         if not self._sleep_with_cancel(0.2, deadline):
+        #             return
+        #         self.ctrl.turn_left(1000)
+        #         if not self._sleep_with_cancel(0.6, deadline):
+        #             return
+        #         self.ctrl.stop()
+        #         if not self._sleep_with_cancel(0.15, deadline):
+        #             return
+        #         self.ctrl.waist(8000)
+        #         if not self._sleep_with_cancel(0.2, deadline):
+        #             return
+        #         self.ctrl.turn_right(1100)
+        #         if not self._sleep_with_cancel(0.6, deadline):
+        #             return
+        #         self.ctrl.waist(self.ctrl.robot.servo_neutral("waist"))
+        #         if not self._sleep_with_cancel(0.15, deadline):
+        #             return
+        #     finally:
+        #         self.ctrl.stop()
+        #         self.ctrl.waist(self.ctrl.robot.servo_neutral("waist"))
+
+        if action == "dance90":
+
+                    WAIST_CENTER = 5000
+                    WAIST_LEFT   = 6500
+                    WAIST_RIGHT  = 3500
+                    try:
+                # ---- LEFT SIDE ----
+                        self.ctrl.turn_left(1000)
+                        if not self._sleep_with_cancel(0.35, deadline):
+                            return
+                        self.ctrl.waist(WAIST_LEFT)
+                        if not self._sleep_with_cancel(0.35, deadline):
+                            return
+                        self.ctrl.stop()
+                        if not self._sleep_with_cancel(0.15, deadline):
+                            return
+
+                # ---- RIGHT SIDE ----
+                        self.ctrl.turn_right(1000)
+                        if not self._sleep_with_cancel(0.35, deadline):
+                            return
+                        self.ctrl.waist(WAIST_RIGHT)
+                        if not self._sleep_with_cancel(0.35, deadline):
+                            return
+                        self.ctrl.stop()
+                        if not self._sleep_with_cancel(0.15, deadline):
+                            return
+
+                # ---- CENTER ----
+                        self.ctrl.waist(WAIST_CENTER)
+                        if not self._sleep_with_cancel(0.3, deadline):
+                            return
+                            # counter the last right turn
+                        self.ctrl.turn_left(1000)
+                        if not self._sleep_with_cancel(0.35, deadline):
+                            return
+                    finally:
+                        self.ctrl.stop()
 
     def _worker_loop(self) -> None:
         while True:
