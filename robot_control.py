@@ -31,8 +31,8 @@ class RobotControl:
             "right_hand_pinch": (2000, 8000),
             "left_wrist_rot": (2000, 8000),
             "left_shoulder_ud": (4000, 8000),
-            # Left shoulder yaw currently disabled (hardware issue): hold neutral only.
-            "left_shoulder_yaw": (6000, 6000),
+            # TODO: tighten after left shoulder yaw hardware fix.
+            "left_shoulder_yaw": (2000, 8000),
             "left_elbow_ud": (7000, 8000),
             "left_wrist_ud": (5200, 8000),
             "left_hand_pinch": (2000, 8000),
@@ -41,6 +41,7 @@ class RobotControl:
         # Drive “speed” is delta from 6000; you said >= 800 moves
         self.DRIVE_MIN = 800
         self.DRIVE_MAX = 1600  # safety cap
+        self.TURN_BOOST = 1.2  # 20% extra turn power
 
         self.stop()  # start safe
 
@@ -95,12 +96,14 @@ class RobotControl:
         self.drive(-speed, -speed)
 
     def turn_left(self, speed=800):
-        print(f"[CTRL] turn_left speed={speed}")
-        self.drive(-speed, speed)
+        boosted = int(round(speed * self.TURN_BOOST))
+        print(f"[CTRL] turn_left speed={speed} boosted={boosted}")
+        self.drive(-boosted, boosted)
 
     def turn_right(self, speed=800):
-        print(f"[CTRL] turn_right speed={speed}")
-        self.drive(speed, -speed)
+        boosted = int(round(speed * self.TURN_BOOST))
+        print(f"[CTRL] turn_right speed={speed} boosted={boosted}")
+        self.drive(boosted, -boosted)
 
     # -------------------------
     # Head + Waist
@@ -257,6 +260,11 @@ class RobotControl:
 
     def reset_arms_neutral(self):
         self.robot.set_arms_neutral()
+
+    def all_servos_neutral(self):
+        self.stop()
+        self.center_pose()
+        self.reset_arms_neutral()
 
     def test_arms_basic(self, hold_s=0.5):
         """

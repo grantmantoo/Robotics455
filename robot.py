@@ -9,7 +9,7 @@ class Robot:
 
         "right_shoulder_ud": 4000,
         "right_shoulder_yaw": 6000,
-        "right_elbow_ud": 4500,
+        "right_elbow_ud": 7000,
         "right_wrist_ud": 5800,
         "right_wrist_rot": 5900,
         "right_hand_pinch": 2000,
@@ -17,9 +17,9 @@ class Robot:
         
         "left_shoulder_ud": 8000,
         "left_shoulder_yaw": 6000,
-        "left_elbow_ud": 4300,
-        "left_wrist_ud": 6000,
-        "left_wrist_rot": 5600,
+        "left_elbow_ud": 7000,
+        "left_wrist_ud": 5800,
+        "left_wrist_rot": 5900,
         "left_hand_pinch": 2000,
     }
 

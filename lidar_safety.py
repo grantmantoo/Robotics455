@@ -29,7 +29,7 @@ class LidarSafetyMonitor:
         self.clear_scans_required = max(1, int(clear_scans_required))
         self.block_scans_required = max(1, int(block_scans_required))
         self.front_zones = front_zones or [(330, 359), (0, 30)]
-        self.rear_zones = rear_zones or [(150, 210)]
+        self.rear_zones = rear_zones or [(180, 210)]
 
         self._lock = threading.Lock()
         self._stop_evt = threading.Event()

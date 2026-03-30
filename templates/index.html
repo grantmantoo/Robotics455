@@ -79,6 +79,7 @@
       <div>
         <button onclick="post('/api/stop', {})">STOP</button>
         <button onclick="post('/api/center', {})">Center</button>
+        <button onclick="post('/api/all_neutral', {})">All Servos Neutral</button>
       </div>
 
       <div style="margin-top:10px;">
@@ -145,26 +146,26 @@
       <div class="big">Head + Waist</div>
 
       <div class="joint-row">
-        Head Pan: <span id="panVal">5800</span><br/>
-        <input id="pan" type="range" min="2000" max="8000" step="50" value="5800"
-               oninput="panVal.textContent=this.value" /><br/>
-        <button onclick="post('/api/head_pan', {value: getInt('pan')})">Send</button>
+        Head Pan: <span id="panVal">45% (5800)</span><br/>
+        <input id="pan" type="range" min="0" max="100" step="1" value="45"
+               oninput="setJointLabel('head_pan', 'pan', 'panVal')" /><br/>
+        <button onclick="post('/api/head_pan', {value: getJointRaw('head_pan', 'pan')})">Send</button>
         <button onclick="post('/api/head_pan', {value: 5800})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Head Tilt: <span id="tiltVal">5500</span><br/>
-        <input id="tilt" type="range" min="2000" max="8000" step="50" value="5500"
-               oninput="tiltVal.textContent=this.value" /><br/>
-        <button onclick="post('/api/head_tilt', {value: getInt('tilt')})">Send</button>
+        Head Tilt: <span id="tiltVal">38% (5500)</span><br/>
+        <input id="tilt" type="range" min="0" max="100" step="1" value="38"
+               oninput="setJointLabel('head_tilt', 'tilt', 'tiltVal')" /><br/>
+        <button onclick="post('/api/head_tilt', {value: getJointRaw('head_tilt', 'tilt')})">Send</button>
         <button onclick="post('/api/head_tilt', {value: 5500})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Waist: <span id="waistVal">5000</span><br/>
-        <input id="waist" type="range" min="2000" max="8000" step="50" value="5000"
-               oninput="waistVal.textContent=this.value" /><br/>
-        <button onclick="post('/api/waist', {value: getInt('waist')})">Send</button>
+        Waist: <span id="waistVal">50% (5000)</span><br/>
+        <input id="waist" type="range" min="0" max="100" step="1" value="50"
+               oninput="setJointLabel('waist', 'waist', 'waistVal')" /><br/>
+        <button onclick="post('/api/waist', {value: getJointRaw('waist', 'waist')})">Send</button>
         <button onclick="post('/api/waist', {value: 5000})">Neutral</button>
       </div>
     </div>
@@ -174,50 +175,50 @@
       <div class="big">Right Arm</div>
 
       <div class="joint-row">
-        Shoulder U/D: <span id="rShoulderUdVal">4000</span><br/>
-        <input id="rShoulderUd" type="range" min="2000" max="8000" step="50" value="4000"
-               oninput="rShoulderUdVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/right_shoulder_ud', 'rShoulderUd')">Send</button>
+        Shoulder U/D: <span id="rShoulderUdVal">0% (4000)</span><br/>
+        <input id="rShoulderUd" type="range" min="0" max="100" step="1" value="0"
+               oninput="setJointLabel('right_shoulder_ud', 'rShoulderUd', 'rShoulderUdVal')" /><br/>
+        <button onclick="sendArm('/api/right_shoulder_ud', 'rShoulderUd', 'right_shoulder_ud')">Send</button>
         <button onclick="post('/api/right_shoulder_ud', {value: 4000})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Shoulder Yaw: <span id="rShoulderYawVal">6000</span><br/>
-        <input id="rShoulderYaw" type="range" min="2000" max="8000" step="50" value="6000"
-               oninput="rShoulderYawVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/right_shoulder_yaw', 'rShoulderYaw')">Send</button>
+        Shoulder Yaw: <span id="rShoulderYawVal">0% (6000)</span><br/>
+        <input id="rShoulderYaw" type="range" min="0" max="100" step="1" value="0"
+               oninput="setJointLabel('right_shoulder_yaw', 'rShoulderYaw', 'rShoulderYawVal')" /><br/>
+        <button onclick="sendArm('/api/right_shoulder_yaw', 'rShoulderYaw', 'right_shoulder_yaw')">Send</button>
         <button onclick="post('/api/right_shoulder_yaw', {value: 6000})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Elbow U/D: <span id="rElbowUdVal">4500</span><br/>
-        <input id="rElbowUd" type="range" min="2000" max="8000" step="50" value="4500"
-               oninput="rElbowUdVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/right_elbow_ud', 'rElbowUd')">Send</button>
-        <button onclick="post('/api/right_elbow_ud', {value: 4500})">Neutral</button>
+        Elbow U/D: <span id="rElbowUdVal">0% (7000)</span><br/>
+        <input id="rElbowUd" type="range" min="0" max="100" step="1" value="0"
+               oninput="setJointLabel('right_elbow_ud', 'rElbowUd', 'rElbowUdVal')" /><br/>
+        <button onclick="sendArm('/api/right_elbow_ud', 'rElbowUd', 'right_elbow_ud')">Send</button>
+        <button onclick="post('/api/right_elbow_ud', {value: 7000})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Wrist U/D: <span id="rWristUdVal">5800</span><br/>
-        <input id="rWristUd" type="range" min="2000" max="8000" step="50" value="5800"
-               oninput="rWristUdVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/right_wrist_ud', 'rWristUd')">Send</button>
+        Wrist U/D: <span id="rWristUdVal">21% (5788)</span><br/>
+        <input id="rWristUd" type="range" min="0" max="100" step="1" value="21"
+               oninput="setJointLabel('right_wrist_ud', 'rWristUd', 'rWristUdVal')" /><br/>
+        <button onclick="sendArm('/api/right_wrist_ud', 'rWristUd', 'right_wrist_ud')">Send</button>
         <button onclick="post('/api/right_wrist_ud', {value: 5800})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Wrist Rotate: <span id="rWristRotVal">5900</span><br/>
-        <input id="rWristRot" type="range" min="2000" max="8000" step="50" value="5900"
-               oninput="rWristRotVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/right_wrist_rot', 'rWristRot')">Send</button>
+        Wrist Rotate: <span id="rWristRotVal">65% (5900)</span><br/>
+        <input id="rWristRot" type="range" min="0" max="100" step="1" value="65"
+               oninput="setJointLabel('right_wrist_rot', 'rWristRot', 'rWristRotVal')" /><br/>
+        <button onclick="sendArm('/api/right_wrist_rot', 'rWristRot', 'right_wrist_rot')">Send</button>
         <button onclick="post('/api/right_wrist_rot', {value: 5900})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Hand Pinch: <span id="rHandPinchVal">2000</span><br/>
-        <input id="rHandPinch" type="range" min="2000" max="8000" step="50" value="2000"
-               oninput="rHandPinchVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/right_hand_pinch', 'rHandPinch')">Send</button>
+        Hand Pinch: <span id="rHandPinchVal">0% (2000)</span><br/>
+        <input id="rHandPinch" type="range" min="0" max="100" step="1" value="0"
+               oninput="setJointLabel('right_hand_pinch', 'rHandPinch', 'rHandPinchVal')" /><br/>
+        <button onclick="sendArm('/api/right_hand_pinch', 'rHandPinch', 'right_hand_pinch')">Send</button>
         <button onclick="post('/api/right_hand_pinch', {value: 2000})">Neutral</button>
       </div>
     </div>
@@ -227,50 +228,50 @@
       <div class="big">Left Arm</div>
 
       <div class="joint-row">
-        Shoulder U/D: <span id="lShoulderUdVal">8000</span><br/>
-        <input id="lShoulderUd" type="range" min="2000" max="8000" step="50" value="8000"
-               oninput="lShoulderUdVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/left_shoulder_ud', 'lShoulderUd')">Send</button>
+        Shoulder U/D: <span id="lShoulderUdVal">100% (8000)</span><br/>
+        <input id="lShoulderUd" type="range" min="0" max="100" step="1" value="100"
+               oninput="setJointLabel('left_shoulder_ud', 'lShoulderUd', 'lShoulderUdVal')" /><br/>
+        <button onclick="sendArm('/api/left_shoulder_ud', 'lShoulderUd', 'left_shoulder_ud')">Send</button>
         <button onclick="post('/api/left_shoulder_ud', {value: 8000})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Shoulder Yaw: <span id="lShoulderYawVal">6000</span><br/>
-        <input id="lShoulderYaw" type="range" min="2000" max="8000" step="50" value="6000"
-               oninput="lShoulderYawVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/left_shoulder_yaw', 'lShoulderYaw')">Send</button>
+        Shoulder Yaw: <span id="lShoulderYawVal">67% (6020)</span><br/>
+        <input id="lShoulderYaw" type="range" min="0" max="100" step="1" value="67"
+               oninput="setJointLabel('left_shoulder_yaw', 'lShoulderYaw', 'lShoulderYawVal')" /><br/>
+        <button onclick="sendArm('/api/left_shoulder_yaw', 'lShoulderYaw', 'left_shoulder_yaw')">Send</button>
         <button onclick="post('/api/left_shoulder_yaw', {value: 6000})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Elbow U/D: <span id="lElbowUdVal">4300</span><br/>
-        <input id="lElbowUd" type="range" min="2000" max="8000" step="50" value="4300"
-               oninput="lElbowUdVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/left_elbow_ud', 'lElbowUd')">Send</button>
-        <button onclick="post('/api/left_elbow_ud', {value: 4300})">Neutral</button>
+        Elbow U/D: <span id="lElbowUdVal">0% (7000)</span><br/>
+        <input id="lElbowUd" type="range" min="0" max="100" step="1" value="0"
+               oninput="setJointLabel('left_elbow_ud', 'lElbowUd', 'lElbowUdVal')" /><br/>
+        <button onclick="sendArm('/api/left_elbow_ud', 'lElbowUd', 'left_elbow_ud')">Send</button>
+        <button onclick="post('/api/left_elbow_ud', {value: 7000})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Wrist U/D: <span id="lWristUdVal">6000</span><br/>
-        <input id="lWristUd" type="range" min="2000" max="8000" step="50" value="6000"
-               oninput="lWristUdVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/left_wrist_ud', 'lWristUd')">Send</button>
-        <button onclick="post('/api/left_wrist_ud', {value: 6000})">Neutral</button>
+        Wrist U/D: <span id="lWristUdVal">21% (5788)</span><br/>
+        <input id="lWristUd" type="range" min="0" max="100" step="1" value="21"
+               oninput="setJointLabel('left_wrist_ud', 'lWristUd', 'lWristUdVal')" /><br/>
+        <button onclick="sendArm('/api/left_wrist_ud', 'lWristUd', 'left_wrist_ud')">Send</button>
+        <button onclick="post('/api/left_wrist_ud', {value: 5800})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Wrist Rotate: <span id="lWristRotVal">5600</span><br/>
-        <input id="lWristRot" type="range" min="2000" max="8000" step="50" value="5600"
-               oninput="lWristRotVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/left_wrist_rot', 'lWristRot')">Send</button>
-        <button onclick="post('/api/left_wrist_rot', {value: 5600})">Neutral</button>
+        Wrist Rotate: <span id="lWristRotVal">65% (5900)</span><br/>
+        <input id="lWristRot" type="range" min="0" max="100" step="1" value="65"
+               oninput="setJointLabel('left_wrist_rot', 'lWristRot', 'lWristRotVal')" /><br/>
+        <button onclick="sendArm('/api/left_wrist_rot', 'lWristRot', 'left_wrist_rot')">Send</button>
+        <button onclick="post('/api/left_wrist_rot', {value: 5900})">Neutral</button>
       </div>
 
       <div class="joint-row">
-        Hand Pinch: <span id="lHandPinchVal">2000</span><br/>
-        <input id="lHandPinch" type="range" min="2000" max="8000" step="50" value="2000"
-               oninput="lHandPinchVal.textContent=this.value" /><br/>
-        <button onclick="sendArm('/api/left_hand_pinch', 'lHandPinch')">Send</button>
+        Hand Pinch: <span id="lHandPinchVal">0% (2000)</span><br/>
+        <input id="lHandPinch" type="range" min="0" max="100" step="1" value="0"
+               oninput="setJointLabel('left_hand_pinch', 'lHandPinch', 'lHandPinchVal')" /><br/>
+        <button onclick="sendArm('/api/left_hand_pinch', 'lHandPinch', 'left_hand_pinch')">Send</button>
         <button onclick="post('/api/left_hand_pinch', {value: 2000})">Neutral</button>
       </div>
     </div>
@@ -353,6 +354,36 @@
     document.getElementById("status").textContent = msg;
   }
 
+  const JOINT_LIMITS = {
+    head_pan: [4000, 8000],
+    head_tilt: [4000, 8000],
+    waist: [4000, 6000],
+    right_shoulder_ud: [4000, 8000],
+    right_shoulder_yaw: [6000, 8000],
+    right_elbow_ud: [7000, 8000],
+    right_wrist_ud: [5200, 8000],
+    right_wrist_rot: [2000, 8000],
+    right_hand_pinch: [2000, 8000],
+    left_shoulder_ud: [4000, 8000],
+    left_shoulder_yaw: [2000, 8000],
+    left_elbow_ud: [7000, 8000],
+    left_wrist_ud: [5200, 8000],
+    left_wrist_rot: [2000, 8000],
+    left_hand_pinch: [2000, 8000]
+  };
+
+  function getJointRaw(jointKey, sliderId) {
+    const [lo, hi] = JOINT_LIMITS[jointKey];
+    const pct = parseInt(document.getElementById(sliderId).value, 10);
+    return Math.round(lo + (hi - lo) * (pct / 100.0));
+  }
+
+  function setJointLabel(jointKey, sliderId, labelId) {
+    const pct = parseInt(document.getElementById(sliderId).value, 10);
+    const raw = getJointRaw(jointKey, sliderId);
+    document.getElementById(labelId).textContent = `${pct}% (${raw})`;
+  }
+
   function getInt(id) {
     return parseInt(document.getElementById(id).value, 10);
   }
@@ -361,8 +392,8 @@
     return getInt("speed");
   }
 
-  function sendArm(endpoint, sliderId) {
-    post(endpoint, { value: getInt(sliderId) });
+  function sendArm(endpoint, sliderId, jointKey) {
+    post(endpoint, { value: getJointRaw(jointKey, sliderId) });
   }
 
   function tankDrive() {
@@ -609,6 +640,24 @@
   });
 
   // Center at load
+  [
+    ["head_pan", "pan", "panVal"],
+    ["head_tilt", "tilt", "tiltVal"],
+    ["waist", "waist", "waistVal"],
+    ["right_shoulder_ud", "rShoulderUd", "rShoulderUdVal"],
+    ["right_shoulder_yaw", "rShoulderYaw", "rShoulderYawVal"],
+    ["right_elbow_ud", "rElbowUd", "rElbowUdVal"],
+    ["right_wrist_ud", "rWristUd", "rWristUdVal"],
+    ["right_wrist_rot", "rWristRot", "rWristRotVal"],
+    ["right_hand_pinch", "rHandPinch", "rHandPinchVal"],
+    ["left_shoulder_ud", "lShoulderUd", "lShoulderUdVal"],
+    ["left_shoulder_yaw", "lShoulderYaw", "lShoulderYawVal"],
+    ["left_elbow_ud", "lElbowUd", "lElbowUdVal"],
+    ["left_wrist_ud", "lWristUd", "lWristUdVal"],
+    ["left_wrist_rot", "lWristRot", "lWristRotVal"],
+    ["left_hand_pinch", "lHandPinch", "lHandPinchVal"]
+  ].forEach(([key, sliderId, labelId]) => setJointLabel(key, sliderId, labelId));
+
   centerJoystick();
 </script>
 </body>

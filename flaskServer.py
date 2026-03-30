@@ -29,9 +29,7 @@ class QuietHandler(WSGIRequestHandler):
 app = Flask(__name__)
 
 # One shared controller instance for the server
-# ctrl = RobotControl(port="/dev/ttyACM0", device=0x0C)
-
-ctrl = RobotControl(port=os.getenv("ROBOT_PORT", "auto"), device=0x0C)
+ctrl = RobotControl(port="/dev/ttyACM0", device=0x0C)
 
 dialog_lock = threading.Lock()
 dialog_engine = None
@@ -39,6 +37,12 @@ action_runner = None
 dialog_state_override = None
 lidar_monitor = None
 LIDAR_CLEAR_SCANS_REQUIRED = 3
+LIDAR_MOTION_GUARD_PERIOD_S = 0.1
+
+_motion_lock = threading.Lock()
+_motion_left = 0
+_motion_right = 0
+_motion_active = False
 
 
 def set_dialog_state(value: Optional[str]):
@@ -90,6 +94,23 @@ def _lidar_block_for_motion(left: int, right: int):
         blocked = bool(status["rear_blocked"])
         return (blocked, "backward", status)
     return (False, None, status)
+
+
+def _set_motion_command(left: int, right: int):
+    global _motion_left, _motion_right, _motion_active
+    with _motion_lock:
+        _motion_left = int(left)
+        _motion_right = int(right)
+        _motion_active = (_motion_left != 0 or _motion_right != 0)
+
+
+def _clear_motion_command():
+    _set_motion_command(0, 0)
+
+
+def _get_motion_command():
+    with _motion_lock:
+        return _motion_left, _motion_right, _motion_active
 
 
 # =========================
@@ -164,8 +185,44 @@ def watchdog_loop():
             timed_out = False
 
 
+def lidar_motion_guard_loop():
+    """
+    Background thread: if wheels are already running from a prior command,
+    enforce lidar stop immediately when front/rear become blocked.
+    """
+    while True:
+        time.sleep(LIDAR_MOTION_GUARD_PERIOD_S)
+        if lidar_monitor is None:
+            continue
+
+        left, right, active = _get_motion_command()
+        if not active:
+            continue
+
+        s = lidar_monitor.status()
+        linear = left + right
+        front_blocked = bool(s.get("front_blocked"))
+        rear_blocked = bool(s.get("rear_blocked"))
+
+        should_stop = (linear > 0 and front_blocked) or (linear < 0 and rear_blocked)
+        if not should_stop:
+            continue
+
+        direction = "forward" if linear > 0 else "backward"
+        try:
+            ctrl.stop()
+            _clear_motion_command()
+            print(
+                f"[LIDAR SAFETY] forced stop while moving direction={direction} "
+                f"left={left} right={right}"
+            )
+        except Exception as e:
+            print(f"[LIDAR SAFETY] forced stop failed: {e}")
+
+
 # start watchdog thread
 threading.Thread(target=watchdog_loop, daemon=True).start()
+threading.Thread(target=lidar_motion_guard_loop, daemon=True).start()
 
 
 # =========================
@@ -242,6 +299,7 @@ def api_drive():
         blocked, direction, lidar_status = _lidar_block_for_motion(left, right)
         if blocked:
             ctrl.stop()
+            _clear_motion_command()
             print(f"[LIDAR SAFETY] blocked {direction} drive command left={left} right={right}")
             return jsonify(
                 {
@@ -254,6 +312,7 @@ def api_drive():
                 }
             )
         ctrl.drive(left, right)
+        _set_motion_command(left, right)
     except Exception as e:
         run_force_stop_async(f"drive exception: {e}")
         return bad(f"drive failed: {e}", code=500)
@@ -274,9 +333,11 @@ def api_forward():
             s = lidar_monitor.status()
             if s["front_blocked"]:
                 ctrl.stop()
+                _clear_motion_command()
                 print(f"[LIDAR SAFETY] blocked forward speed={speed}")
                 return jsonify({"ok": True, "blocked": True, "direction": "forward", "speed": 0, "lidar": s})
         ctrl.forward(speed)
+        _set_motion_command(speed, speed)
     except Exception as e:
         run_force_stop_async(f"forward exception: {e}")
         return bad(f"forward failed: {e}", code=500)
@@ -296,9 +357,11 @@ def api_backward():
             s = lidar_monitor.status()
             if s["rear_blocked"]:
                 ctrl.stop()
+                _clear_motion_command()
                 print(f"[LIDAR SAFETY] blocked backward speed={speed}")
                 return jsonify({"ok": True, "blocked": True, "direction": "backward", "speed": 0, "lidar": s})
         ctrl.backward(speed)
+        _set_motion_command(-speed, -speed)
     except Exception as e:
         run_force_stop_async(f"backward exception: {e}")
         return bad(f"backward failed: {e}", code=500)
@@ -315,6 +378,7 @@ def api_turn_left():
         return bad("speed must be int")
     try:
         ctrl.turn_left(speed)
+        _set_motion_command(-speed, speed)
     except Exception as e:
         run_force_stop_async(f"turn_left exception: {e}")
         return bad(f"turn_left failed: {e}", code=500)
@@ -331,6 +395,7 @@ def api_turn_right():
         return bad("speed must be int")
     try:
         ctrl.turn_right(speed)
+        _set_motion_command(speed, -speed)
     except Exception as e:
         run_force_stop_async(f"turn_right exception: {e}")
         return bad(f"turn_right failed: {e}", code=500)
@@ -346,6 +411,7 @@ def api_stop():
         if dialog_engine is not None:
             dialog_engine.reset_to_idle("manual stop")
         ctrl.stop()
+        _clear_motion_command()
     except Exception as e:
         run_force_stop_async(f"stop exception: {e}")
         return bad(f"stop failed: {e}", code=500)
@@ -357,9 +423,22 @@ def api_center():
     touch_heartbeat()
     try:
         ctrl.center_pose()
+        _clear_motion_command()
     except Exception as e:
         run_force_stop_async(f"center exception: {e}")
         return bad(f"center failed: {e}", code=500)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/all_neutral", methods=["POST"])
+def api_all_neutral():
+    touch_heartbeat()
+    try:
+        ctrl.all_servos_neutral()
+        _clear_motion_command()
+    except Exception as e:
+        run_force_stop_async(f"all_neutral exception: {e}")
+        return bad(f"all_neutral failed: {e}", code=500)
     return jsonify({"ok": True})
 
 
@@ -561,6 +640,7 @@ def api_dialog_input():
     # even if wheels were started by manual drive controls.
     try:
         ctrl.stop()
+        _clear_motion_command()
     except Exception as ex:
         print(f"[DIALOG] deadman stop failed: {ex}")
 
@@ -583,6 +663,7 @@ def api_dialog_input():
             action_runner.interrupt()
         try:
             ctrl.stop()
+            _clear_motion_command()
         except Exception as ex:
             print(f"[DIALOG] stop failed on interrupt: {ex}")
 
