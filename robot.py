@@ -2,40 +2,24 @@ from motor import Motor
 from servo import Servo
 
 class Robot:
-    SERVO_LIMITS = {
-        "head_pan": (4000, 8000),
-        "waist": (4000, 6000),
-        "head_tilt": (4000, 8000),
-        "right_shoulder_ud": (4000, 8000),
-        "right_shoulder_yaw": (6000, 8000),
-        "right_elbow_ud": (7000, 8000),
-        "right_wrist_ud": (5200, 8000),
-        "right_wrist_rot": (2000, 8000),
-        "right_hand_pinch": (2000, 8000),
-        "left_wrist_rot": (2000, 8000),
-        "left_shoulder_ud": (4000, 8000),
-        # Left shoulder yaw currently disabled (hardware issue): hold neutral only.
-        "left_shoulder_yaw": (6000, 6000),
-        "left_elbow_ud": (7000, 8000),
-        "left_wrist_ud": (5200, 8000),
-        "left_hand_pinch": (2000, 8000),
-    }
-
     SERVO_NEUTRALS = {
         "head_pan": 5800,
         "waist": 5000,
         "head_tilt": 5500,
+
         "right_shoulder_ud": 4000,
         "right_shoulder_yaw": 6000,
-        "right_elbow_ud": 7000,
+        "right_elbow_ud": 4500,
         "right_wrist_ud": 5800,
         "right_wrist_rot": 5900,
         "right_hand_pinch": 2000,
-        "left_wrist_rot": 5900,
+
+        
         "left_shoulder_ud": 8000,
         "left_shoulder_yaw": 6000,
-        "left_elbow_ud": 7000,
-        "left_wrist_ud": 5800,
+        "left_elbow_ud": 4300,
+        "left_wrist_ud": 6000,
+        "left_wrist_rot": 5600,
         "left_hand_pinch": 2000,
     }
 
@@ -59,101 +43,26 @@ class Robot:
         )
 
         # Head / torso
-        self.head_pan  = Servo(
-            maestro, 2,
-            min_val=self.SERVO_LIMITS["head_pan"][0],
-            max_val=self.SERVO_LIMITS["head_pan"][1],
-            center_val=self.SERVO_NEUTRALS["head_pan"]
-        )
-        self.waist     = Servo(
-            maestro, 3,
-            min_val=self.SERVO_LIMITS["waist"][0],
-            max_val=self.SERVO_LIMITS["waist"][1],
-            center_val=self.SERVO_NEUTRALS["waist"]
-        )
-        self.head_tilt = Servo(
-            maestro, 4,
-            min_val=self.SERVO_LIMITS["head_tilt"][0],
-            max_val=self.SERVO_LIMITS["head_tilt"][1],
-            center_val=self.SERVO_NEUTRALS["head_tilt"]
-        )
+        self.head_pan  = Servo(maestro, 2, center_val=self.SERVO_NEUTRALS["head_pan"])
+        self.waist     = Servo(maestro, 3, center_val=self.SERVO_NEUTRALS["waist"])
+        self.head_tilt = Servo(maestro, 4, center_val=self.SERVO_NEUTRALS["head_tilt"])
 
         # Arms
         # Right arm
-        self.right_shoulder_ud = Servo(
-            maestro, 5,
-            min_val=self.SERVO_LIMITS["right_shoulder_ud"][0],
-            max_val=self.SERVO_LIMITS["right_shoulder_ud"][1],
-            center_val=self.SERVO_NEUTRALS["right_shoulder_ud"]
-        )
-        self.right_shoulder_yaw = Servo(
-            maestro, 6,
-            min_val=self.SERVO_LIMITS["right_shoulder_yaw"][0],
-            max_val=self.SERVO_LIMITS["right_shoulder_yaw"][1],
-            center_val=self.SERVO_NEUTRALS["right_shoulder_yaw"]
-        )
-        self.right_elbow_ud = Servo(
-            maestro, 7,
-            min_val=self.SERVO_LIMITS["right_elbow_ud"][0],
-            max_val=self.SERVO_LIMITS["right_elbow_ud"][1],
-            center_val=self.SERVO_NEUTRALS["right_elbow_ud"]
-        )
-        self.right_wrist_ud = Servo(
-            maestro, 8,
-            min_val=self.SERVO_LIMITS["right_wrist_ud"][0],
-            max_val=self.SERVO_LIMITS["right_wrist_ud"][1],
-            center_val=self.SERVO_NEUTRALS["right_wrist_ud"]
-        )
-        self.right_wrist_rot = Servo(
-            maestro, 9,
-            min_val=self.SERVO_LIMITS["right_wrist_rot"][0],
-            max_val=self.SERVO_LIMITS["right_wrist_rot"][1],
-            center_val=self.SERVO_NEUTRALS["right_wrist_rot"]
-        )
-        self.right_hand_pinch = Servo(
-            maestro, 10,
-            min_val=self.SERVO_LIMITS["right_hand_pinch"][0],
-            max_val=self.SERVO_LIMITS["right_hand_pinch"][1],
-            center_val=self.SERVO_NEUTRALS["right_hand_pinch"]
-        )
+        self.right_shoulder_ud = Servo(maestro, 5, center_val=self.SERVO_NEUTRALS["right_shoulder_ud"])
+        self.right_shoulder_yaw = Servo(maestro, 6, center_val=self.SERVO_NEUTRALS["right_shoulder_yaw"])
+        self.right_elbow_ud = Servo(maestro, 7, center_val=self.SERVO_NEUTRALS["right_elbow_ud"])
+        self.right_wrist_ud = Servo(maestro, 8, center_val=self.SERVO_NEUTRALS["right_wrist_ud"])
+        self.right_wrist_rot = Servo(maestro, 9, center_val=self.SERVO_NEUTRALS["right_wrist_rot"])
+        self.right_hand_pinch = Servo(maestro, 10, center_val=self.SERVO_NEUTRALS["right_hand_pinch"])
 
         # Left arm
-        self.left_wrist_rot = Servo(
-            maestro, 11,
-            min_val=self.SERVO_LIMITS["left_wrist_rot"][0],
-            max_val=self.SERVO_LIMITS["left_wrist_rot"][1],
-            center_val=self.SERVO_NEUTRALS["left_wrist_rot"]
-        )
-        self.left_shoulder_ud = Servo(
-            maestro, 12,
-            min_val=self.SERVO_LIMITS["left_shoulder_ud"][0],
-            max_val=self.SERVO_LIMITS["left_shoulder_ud"][1],
-            center_val=self.SERVO_NEUTRALS["left_shoulder_ud"]
-        )
-        self.left_shoulder_yaw = Servo(
-            maestro, 13,
-            min_val=self.SERVO_LIMITS["left_shoulder_yaw"][0],
-            max_val=self.SERVO_LIMITS["left_shoulder_yaw"][1],
-            center_val=self.SERVO_NEUTRALS["left_shoulder_yaw"]
-        )
-        self.left_elbow_ud = Servo(
-            maestro, 14,
-            min_val=self.SERVO_LIMITS["left_elbow_ud"][0],
-            max_val=self.SERVO_LIMITS["left_elbow_ud"][1],
-            center_val=self.SERVO_NEUTRALS["left_elbow_ud"]
-        )
-        self.left_wrist_ud = Servo(
-            maestro, 15,
-            min_val=self.SERVO_LIMITS["left_wrist_ud"][0],
-            max_val=self.SERVO_LIMITS["left_wrist_ud"][1],
-            center_val=self.SERVO_NEUTRALS["left_wrist_ud"]
-        )
-        self.left_hand_pinch = Servo(
-            maestro, 16,
-            min_val=self.SERVO_LIMITS["left_hand_pinch"][0],
-            max_val=self.SERVO_LIMITS["left_hand_pinch"][1],
-            center_val=self.SERVO_NEUTRALS["left_hand_pinch"]
-        )
+        self.left_wrist_rot = Servo(maestro, 11, center_val=self.SERVO_NEUTRALS["left_wrist_rot"])
+        self.left_shoulder_ud = Servo(maestro, 12, center_val=self.SERVO_NEUTRALS["left_shoulder_ud"])
+        self.left_shoulder_yaw = Servo(maestro, 13, center_val=self.SERVO_NEUTRALS["left_shoulder_yaw"])
+        self.left_elbow_ud = Servo(maestro, 14, center_val=self.SERVO_NEUTRALS["left_elbow_ud"])
+        self.left_wrist_ud = Servo(maestro, 15, center_val=self.SERVO_NEUTRALS["left_wrist_ud"])
+        self.left_hand_pinch = Servo(maestro, 16, center_val=self.SERVO_NEUTRALS["left_hand_pinch"])
 
         print("[INIT] Robot ready")
 
