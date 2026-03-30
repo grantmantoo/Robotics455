@@ -2,6 +2,12 @@ from flask import Flask, request, jsonify, render_template
 from robot_control import RobotControl
 from dialog_engine import DialogEngine
 from action_runner import ActionRunner
+try:
+    from lidar_safety import LidarSafetyMonitor
+    LIDAR_IMPORT_ERROR = None
+except Exception as _lidar_import_ex:
+    LidarSafetyMonitor = None
+    LIDAR_IMPORT_ERROR = str(_lidar_import_ex)
 
 import logging
 from werkzeug.serving import WSGIRequestHandler
@@ -23,11 +29,16 @@ class QuietHandler(WSGIRequestHandler):
 app = Flask(__name__)
 
 # One shared controller instance for the server
-ctrl = RobotControl(port="/dev/ttyACM0", device=0x0C)
+# ctrl = RobotControl(port="/dev/ttyACM0", device=0x0C)
+
+ctrl = RobotControl(port=os.getenv("ROBOT_PORT", "auto"), device=0x0C)
+
 dialog_lock = threading.Lock()
 dialog_engine = None
 action_runner = None
 dialog_state_override = None
+lidar_monitor = None
+LIDAR_CLEAR_SCANS_REQUIRED = 3
 
 
 def set_dialog_state(value: Optional[str]):
@@ -62,6 +73,25 @@ def bad(msg, code=400):
     return jsonify({"ok": False, "error": msg}), code
 
 
+def _lidar_block_for_motion(left: int, right: int):
+    """
+    Returns (blocked: bool, direction: str|None, status: dict|None)
+    direction is 'forward', 'backward', or None.
+    """
+    if lidar_monitor is None:
+        return (False, None, None)
+
+    status = lidar_monitor.status()
+    linear = left + right
+    if linear > 0:
+        blocked = bool(status["front_blocked"])
+        return (blocked, "forward", status)
+    if linear < 0:
+        blocked = bool(status["rear_blocked"])
+        return (blocked, "backward", status)
+    return (False, None, status)
+
+
 # =========================
 # Watchdog / Force Stop
 # =========================
@@ -70,12 +100,14 @@ HEARTBEAT_TIMEOUT_S = 1.0   # if we haven't heard from browser in this many seco
 WATCHDOG_PERIOD_S = 0.1     # how often watchdog checks
 
 _last_heartbeat = time.time()
+_has_seen_heartbeat = False
 _force_stop_lock = threading.Lock()
 _force_stop_running = False
 
 def touch_heartbeat():
-    global _last_heartbeat
+    global _last_heartbeat, _has_seen_heartbeat
     _last_heartbeat = time.time()
+    _has_seen_heartbeat = True
 
 def run_force_stop_async(reason: str):
     """
@@ -96,17 +128,10 @@ def run_force_stop_async(reason: str):
                 action_runner.interrupt()
             if dialog_engine is not None:
                 dialog_engine.reset_to_idle("watchdog force stop")
-
-            # Prefer your dedicated script (exactly what you asked for)
-            script_path = os.path.join(os.path.dirname(__file__), "force_stop.py")
-            if os.path.exists(script_path):
-                subprocess.run(["python3", script_path], check=False)
-            else:
-                print("[WATCHDOG] force_stop.py not found рядом с flaskServer.py; falling back to ctrl.stop()")
-                try:
-                    ctrl.stop()
-                except Exception as e:
-                    print(f"[WATCHDOG] ctrl.stop() failed: {e}")
+            try:
+                ctrl.stop()
+            except Exception as e:
+                print(f"[WATCHDOG] ctrl.stop() failed: {e}")
 
         finally:
             with _force_stop_lock:
@@ -119,11 +144,14 @@ def watchdog_loop():
     Background thread: if heartbeat becomes stale -> force stop ONCE,
     then wait until heartbeat returns before allowing another trigger.
     """
-    global _last_heartbeat
+    global _last_heartbeat, _has_seen_heartbeat
     timed_out = False  # local state: have we already triggered for the current outage?
 
     while True:
         time.sleep(WATCHDOG_PERIOD_S)
+        if not _has_seen_heartbeat:
+            # Do not watchdog-force-stop before the browser has ever connected.
+            continue
         age = time.time() - _last_heartbeat
 
         if age > HEARTBEAT_TIMEOUT_S:
@@ -211,12 +239,26 @@ def api_drive():
         return bad("left/right out of allowed range")
 
     try:
+        blocked, direction, lidar_status = _lidar_block_for_motion(left, right)
+        if blocked:
+            ctrl.stop()
+            print(f"[LIDAR SAFETY] blocked {direction} drive command left={left} right={right}")
+            return jsonify(
+                {
+                    "ok": True,
+                    "blocked": True,
+                    "direction": direction,
+                    "left": 0,
+                    "right": 0,
+                    "lidar": lidar_status,
+                }
+            )
         ctrl.drive(left, right)
     except Exception as e:
         run_force_stop_async(f"drive exception: {e}")
         return bad(f"drive failed: {e}", code=500)
 
-    return jsonify({"ok": True, "left": left, "right": right})
+    return jsonify({"ok": True, "blocked": False, "left": left, "right": right})
 
 
 @app.route("/api/forward", methods=["POST"])
@@ -228,11 +270,17 @@ def api_forward():
     except (ValueError, TypeError):
         return bad("speed must be int")
     try:
+        if lidar_monitor is not None:
+            s = lidar_monitor.status()
+            if s["front_blocked"]:
+                ctrl.stop()
+                print(f"[LIDAR SAFETY] blocked forward speed={speed}")
+                return jsonify({"ok": True, "blocked": True, "direction": "forward", "speed": 0, "lidar": s})
         ctrl.forward(speed)
     except Exception as e:
         run_force_stop_async(f"forward exception: {e}")
         return bad(f"forward failed: {e}", code=500)
-    return jsonify({"ok": True, "speed": speed})
+    return jsonify({"ok": True, "blocked": False, "speed": speed})
 
 
 @app.route("/api/backward", methods=["POST"])
@@ -244,11 +292,17 @@ def api_backward():
     except (ValueError, TypeError):
         return bad("speed must be int")
     try:
+        if lidar_monitor is not None:
+            s = lidar_monitor.status()
+            if s["rear_blocked"]:
+                ctrl.stop()
+                print(f"[LIDAR SAFETY] blocked backward speed={speed}")
+                return jsonify({"ok": True, "blocked": True, "direction": "backward", "speed": 0, "lidar": s})
         ctrl.backward(speed)
     except Exception as e:
         run_force_stop_async(f"backward exception: {e}")
         return bad(f"backward failed: {e}", code=500)
-    return jsonify({"ok": True, "speed": speed})
+    return jsonify({"ok": True, "blocked": False, "speed": speed})
 
 
 @app.route("/api/turn_left", methods=["POST"])
@@ -484,6 +538,19 @@ def api_dialog_state():
     )
 
 
+@app.route("/api/lidar_status", methods=["GET"])
+def api_lidar_status():
+    if lidar_monitor is None:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "lidar monitor not configured",
+                "import_error": LIDAR_IMPORT_ERROR,
+            }
+        ), 500
+    return jsonify({"ok": True, "lidar": lidar_monitor.status()})
+
+
 @app.route("/api/dialog_input", methods=["POST"])
 def api_dialog_input():
     touch_heartbeat()
@@ -556,7 +623,33 @@ if __name__ == "__main__":
         default=None,
         help="Random seed for deterministic dialog output choices",
     )
+    parser.add_argument(
+        "--lidar-port",
+        default=os.getenv("LIDAR_PORT", "auto"),
+        help="Lidar serial device path or 'auto'",
+    )
+    parser.add_argument(
+        "--lidar-stop-mm",
+        type=int,
+        default=int(os.getenv("LIDAR_STOP_MM", "800")),
+        help="Stop distance threshold in mm",
+    )
     args = parser.parse_args()
+
+    # Start lidar monitor before serving requests (if module is available).
+    if LidarSafetyMonitor is not None:
+        lidar_monitor = LidarSafetyMonitor(
+            port=args.lidar_port,
+            stop_mm=args.lidar_stop_mm,
+            clear_scans_required=LIDAR_CLEAR_SCANS_REQUIRED,
+        )
+        lidar_monitor.start()
+        print(
+            f"[LIDAR] monitor started port={args.lidar_port} stop_mm={args.lidar_stop_mm} "
+            f"clear_scans_required={LIDAR_CLEAR_SCANS_REQUIRED}"
+        )
+    else:
+        print(f"[LIDAR WARN] lidar monitor disabled (import failed): {LIDAR_IMPORT_ERROR}")
 
     configure_dialog_engine(args.dialog_script, args.seed)
     PORT = args.port

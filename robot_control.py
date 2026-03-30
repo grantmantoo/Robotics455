@@ -17,13 +17,26 @@ class RobotControl:
         self.robot = Robot(self.maestro)
 
         # ---- SAFE LIMITS (tune as needed) ----
-        # Servo values are on your 2000..8000 scale, center 5000
-        self.HEAD_PAN_MIN = 2000
-        self.HEAD_PAN_MAX = 8000
-        self.HEAD_TILT_MIN = 2000
-        self.HEAD_TILT_MAX = 8000
-        self.WAIST_MIN = 2000
-        self.WAIST_MAX = 8000
+        # Servo values are on your 2000..8000 scale.
+        # Waist is intentionally narrowed for cable safety.
+        self.SERVO_LIMITS = {
+            "head_pan": (4000, 8000),
+            "waist": (4000, 6000),
+            "head_tilt": (4000, 8000),
+            "right_shoulder_ud": (4000, 8000),
+            "right_shoulder_yaw": (6000, 8000),
+            "right_elbow_ud": (7000, 8000),
+            "right_wrist_ud": (5200, 8000),
+            "right_wrist_rot": (2000, 8000),
+            "right_hand_pinch": (2000, 8000),
+            "left_wrist_rot": (2000, 8000),
+            "left_shoulder_ud": (4000, 8000),
+            # Left shoulder yaw currently disabled (hardware issue): hold neutral only.
+            "left_shoulder_yaw": (6000, 6000),
+            "left_elbow_ud": (7000, 8000),
+            "left_wrist_ud": (5200, 8000),
+            "left_hand_pinch": (2000, 8000),
+        }
 
         # Drive “speed” is delta from 6000; you said >= 800 moves
         self.DRIVE_MIN = 800
@@ -92,18 +105,22 @@ class RobotControl:
     # -------------------------
     # Head + Waist
     # -------------------------
+    def _servo_clamp(self, name, value):
+        lo, hi = self.SERVO_LIMITS.get(name, (2000, 8000))
+        return int(clamp(value, lo, hi))
+
     def head_pan(self, value):
-        value = int(clamp(value, self.HEAD_PAN_MIN, self.HEAD_PAN_MAX))
+        value = self._servo_clamp("head_pan", value)
         print(f"[CTRL] head_pan -> {value}")
         self.robot.head_pan.move(value)
 
     def head_tilt(self, value):
-        value = int(clamp(value, self.HEAD_TILT_MIN, self.HEAD_TILT_MAX))
+        value = self._servo_clamp("head_tilt", value)
         print(f"[CTRL] head_tilt -> {value}")
         self.robot.head_tilt.move(value)
 
     def waist(self, value):
-        value = int(clamp(value, self.WAIST_MIN, self.WAIST_MAX))
+        value = self._servo_clamp("waist", value)
         print(f"[CTRL] waist -> {value}")
         self.robot.waist.move(value)
 
@@ -117,7 +134,7 @@ class RobotControl:
     # Arm joints
     # -------------------------
     def _arm_move(self, attr_name, label, value):
-        value = int(clamp(value, 2000, 8000))
+        value = self._servo_clamp(attr_name, value)
         servo = getattr(self.robot, attr_name, None)
         if servo is None:
             raise ValueError(f"{label} servo is not configured")
@@ -186,7 +203,7 @@ class RobotControl:
             return self.robot.servo_neutral(name)
 
         def with_delta(name, delta):
-            return int(clamp(neutral(name) + delta, 2000, 8000))
+            return self._servo_clamp(name, neutral(name) + delta)
 
         if should_stop():
             return
