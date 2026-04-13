@@ -35,9 +35,9 @@ class Motor:
         self.maestro.setTarget(self.channel, self.neutral)
         time.sleep(arm_time)
 
-    def _clamp_delta(self, delta):
+    def _clamp_delta(self, delta, enforce_min=True):
         delta = abs(int(delta))
-        if delta < self.min_delta:
+        if enforce_min and delta < self.min_delta:
             print(
                 f"[MOTOR WARN] ch{self.channel} delta {delta} < "
                 f"{self.min_delta}, raising"
@@ -60,12 +60,27 @@ class Motor:
         self.maestro.setTarget(self.channel, value)
 
     def forward(self, speed=800):
-        d = self._clamp_delta(speed)
+        d = self._clamp_delta(speed, enforce_min=True)
         self._send(self.neutral + (self.forward_sign * d), "FORWARD")
 
     def backward(self, speed=800):
-        d = self._clamp_delta(speed)
+        d = self._clamp_delta(speed, enforce_min=True)
         self._send(self.neutral - (self.forward_sign * d), "BACKWARD")
 
     def stop_motor(self):
         self._send(self.neutral, "STOP")
+
+    def drive_signed(self, signed_speed, enforce_min=True):
+        """
+        signed_speed:
+            > 0 robot-forward delta from neutral
+            < 0 robot-backward delta from neutral
+            = 0 stop
+        """
+        s = int(signed_speed)
+        if s == 0:
+            self.stop_motor()
+            return
+        d = self._clamp_delta(abs(s), enforce_min=enforce_min)
+        signed = d if s > 0 else -d
+        self._send(self.neutral + (self.forward_sign * signed), "DRIVE")

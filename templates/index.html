@@ -78,8 +78,9 @@
       </div>
       <div>
         <button onclick="post('/api/stop', {})">STOP</button>
-        <button onclick="post('/api/center', {})">Center</button>
-        <button onclick="post('/api/all_neutral', {})">All Servos Neutral</button>
+        <button onclick="geekedPose()">Geeked</button>
+        <button onclick="lockInPose()">Locked It</button>
+        <button onclick="post('/api/six_seven', {})">6-7</button>
       </div>
 
       <div style="margin-top:10px;">
@@ -228,8 +229,8 @@
       <div class="big">Left Arm</div>
 
       <div class="joint-row">
-        Shoulder U/D: <span id="lShoulderUdVal">100% (8000)</span><br/>
-        <input id="lShoulderUd" type="range" min="0" max="100" step="1" value="100"
+        Shoulder U/D: <span id="lShoulderUdVal">0% (8000)</span><br/>
+        <input id="lShoulderUd" type="range" min="0" max="100" step="1" value="0"
                oninput="setJointLabel('left_shoulder_ud', 'lShoulderUd', 'lShoulderUdVal')" /><br/>
         <button onclick="sendArm('/api/left_shoulder_ud', 'lShoulderUd', 'left_shoulder_ud')">Send</button>
         <button onclick="post('/api/left_shoulder_ud', {value: 8000})">Neutral</button>
@@ -308,6 +309,41 @@
       </div>
       <div id="dialogOutput" class="dialog-output">No dialog input yet.</div>
     </div>
+
+    <!-- Wall Follower -->
+    <div class="card">
+      <div class="big">Wall Follower (Project 4)</div>
+      <div style="margin-top:8px;">
+        Side:
+        <select id="wfSide">
+          <option value="right" selected>Right Wall</option>
+          <option value="left">Left Wall</option>
+        </select>
+      </div>
+      <div style="margin-top:8px;">
+        Target mm: <input id="wfTarget" type="number" value="1000" style="width:90px;" />
+        Tol mm: <input id="wfTol" type="number" value="150" style="width:90px;" />
+      </div>
+      <div style="margin-top:8px;">
+        Set speed:
+        <input id="wfSetSpeed" type="range" min="1000" max="1400" step="10" value="1000"
+               oninput="syncWallSpeedInputs()" style="width:220px;" />
+        <span id="wfSetSpeedVal">1000</span>
+      </div>
+      <div style="margin-top:8px;">
+        Delta (+/-):
+        <input id="wfDelta" type="range" min="100" max="300" step="10" value="200"
+               oninput="syncWallSpeedInputs()" style="width:220px;" />
+        <span id="wfDeltaVal">200</span>
+        <span id="wfBandVal" style="margin-left:8px; color:#bbb;">(range 800..1200)</span>
+      </div>
+      <div style="margin-top:10px;">
+        <button onclick="startWallFollow()">Start Wall Follow</button>
+        <button onclick="stopWallFollow()">Stop Wall Follow</button>
+        <button onclick="refreshWallFollowStatus()">Refresh</button>
+      </div>
+      <div id="wallFollowOutput" class="dialog-output">Wall follower idle.</div>
+    </div>
   </div>
 
   <div class="status">
@@ -354,6 +390,8 @@
     document.getElementById("status").textContent = msg;
   }
 
+  syncWallSpeedInputs();
+
   const JOINT_LIMITS = {
     head_pan: [4000, 8000],
     head_tilt: [4000, 8000],
@@ -371,11 +409,57 @@
     left_wrist_rot: [2000, 8000],
     left_hand_pinch: [2000, 8000]
   };
+  const INVERTED_PERCENT_JOINTS = new Set(["left_shoulder_ud"]);
+  const JOINT_SLIDER_MAP = {
+    head_pan: ["pan", "panVal"],
+    head_tilt: ["tilt", "tiltVal"],
+    waist: ["waist", "waistVal"],
+    right_shoulder_ud: ["rShoulderUd", "rShoulderUdVal"],
+    right_shoulder_yaw: ["rShoulderYaw", "rShoulderYawVal"],
+    right_elbow_ud: ["rElbowUd", "rElbowUdVal"],
+    right_wrist_ud: ["rWristUd", "rWristUdVal"],
+    right_wrist_rot: ["rWristRot", "rWristRotVal"],
+    right_hand_pinch: ["rHandPinch", "rHandPinchVal"],
+    left_shoulder_ud: ["lShoulderUd", "lShoulderUdVal"],
+    left_shoulder_yaw: ["lShoulderYaw", "lShoulderYawVal"],
+    left_elbow_ud: ["lElbowUd", "lElbowUdVal"],
+    left_wrist_ud: ["lWristUd", "lWristUdVal"],
+    left_wrist_rot: ["lWristRot", "lWristRotVal"],
+    left_hand_pinch: ["lHandPinch", "lHandPinchVal"]
+  };
 
   function getJointRaw(jointKey, sliderId) {
     const [lo, hi] = JOINT_LIMITS[jointKey];
     const pct = parseInt(document.getElementById(sliderId).value, 10);
+    if (INVERTED_PERCENT_JOINTS.has(jointKey)) {
+      return Math.round(hi - (hi - lo) * (pct / 100.0));
+    }
     return Math.round(lo + (hi - lo) * (pct / 100.0));
+  }
+
+  function jointRawToPercent(jointKey, raw) {
+    const [lo, hi] = JOINT_LIMITS[jointKey];
+    if (hi === lo) return 0;
+    let pct;
+    if (INVERTED_PERCENT_JOINTS.has(jointKey)) {
+      pct = ((hi - raw) / (hi - lo)) * 100.0;
+    } else {
+      pct = ((raw - lo) / (hi - lo)) * 100.0;
+    }
+    return Math.max(0, Math.min(100, Math.round(pct)));
+  }
+
+  function applyJointValues(values) {
+    if (!values || typeof values !== "object") return;
+    for (const [jointKey, rawVal] of Object.entries(values)) {
+      if (!(jointKey in JOINT_SLIDER_MAP) || !(jointKey in JOINT_LIMITS)) continue;
+      const [sliderId, labelId] = JOINT_SLIDER_MAP[jointKey];
+      const slider = document.getElementById(sliderId);
+      if (!slider) continue;
+      const raw = Number(rawVal);
+      slider.value = String(jointRawToPercent(jointKey, raw));
+      setJointLabel(jointKey, sliderId, labelId);
+    }
   }
 
   function setJointLabel(jointKey, sliderId, labelId) {
@@ -394,6 +478,46 @@
 
   function sendArm(endpoint, sliderId, jointKey) {
     post(endpoint, { value: getJointRaw(jointKey, sliderId) });
+  }
+
+  async function geekedPose() {
+    try {
+      setStatus("sending /api/geeked ...");
+      const res = await fetch("/api/geeked", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: " + (data.error || "geeked failed"));
+        return;
+      }
+      applyJointValues(data.values);
+      setStatus("ok: /api/geeked");
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
+  async function lockInPose() {
+    try {
+      setStatus("sending /api/all_neutral ...");
+      const res = await fetch("/api/all_neutral", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: " + (data.error || "all_neutral failed"));
+        return;
+      }
+      applyJointValues(data.values);
+      setStatus("ok: /api/all_neutral");
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
   }
 
   function tankDrive() {
@@ -423,6 +547,99 @@
 
   function sayPreset(text) {
     post("/api/speak_text", { text });
+  }
+
+  async function startWallFollow() {
+    const setSpeed = parseInt(document.getElementById("wfSetSpeed").value, 10);
+    const delta = parseInt(document.getElementById("wfDelta").value, 10);
+    const body = {
+      side: document.getElementById("wfSide").value,
+      target_mm: parseInt(document.getElementById("wfTarget").value, 10),
+      tolerance_mm: parseInt(document.getElementById("wfTol").value, 10),
+      set_speed: setSpeed,
+      correction_band: delta
+    };
+    try {
+      setStatus("sending /api/wall_follow/start ...");
+      const res = await fetch("/api/wall_follow/start", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: " + (data.error || "wall follow start failed"));
+        return;
+      }
+      setStatus("ok: /api/wall_follow/start");
+      renderWallFollowStatus(data.wall_follow);
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
+  async function stopWallFollow() {
+    try {
+      setStatus("sending /api/wall_follow/stop ...");
+      const res = await fetch("/api/wall_follow/stop", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: " + (data.error || "wall follow stop failed"));
+        return;
+      }
+      setStatus("ok: /api/wall_follow/stop");
+      renderWallFollowStatus(data.wall_follow);
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
+  function renderWallFollowStatus(s) {
+    if (!s) return;
+    const cfg = s.config || {};
+    const minSpeed = (cfg.min_speed != null) ? cfg.min_speed : "n/a";
+    const maxSpeed = (cfg.max_speed != null) ? cfg.max_speed : "n/a";
+    const out =
+      "Active: " + s.active + "\n" +
+      "State: " + (s.last_state || "UNKNOWN") + "\n" +
+      "Side dist mm: " + (s.last_side_mm == null ? "n/a" : s.last_side_mm) + "\n" +
+      "Front dist mm: " + (s.last_front_mm == null ? "n/a" : s.last_front_mm) + "\n" +
+      "Last cmd: " + JSON.stringify(s.last_cmd || {}) + "\n" +
+      "Config: side=" + (cfg.side || "n/a") +
+      " target=" + (cfg.target_mm || "n/a") +
+      " tol=" + (cfg.tolerance_mm || "n/a") +
+      " set=" + (cfg.base_speed || "n/a") +
+      " delta=" + (cfg.correction_band || "n/a") +
+      " window=" + minSpeed + ".." + maxSpeed;
+    document.getElementById("wallFollowOutput").textContent = out;
+  }
+
+  function syncWallSpeedInputs() {
+    const setSpeed = parseInt(document.getElementById("wfSetSpeed").value, 10);
+    const delta = parseInt(document.getElementById("wfDelta").value, 10);
+    document.getElementById("wfSetSpeedVal").textContent = String(setSpeed);
+    document.getElementById("wfDeltaVal").textContent = String(delta);
+    document.getElementById("wfBandVal").textContent =
+      "(range " + (setSpeed - delta) + ".." + (setSpeed + delta) + ")";
+  }
+
+  async function refreshWallFollowStatus() {
+    try {
+      const res = await fetch("/api/wall_follow/status");
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: wall follow status failed");
+        return;
+      }
+      renderWallFollowStatus(data.wall_follow);
+      setStatus("ok: /api/wall_follow/status");
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
   }
 
   async function sendDialog() {

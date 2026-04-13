@@ -1,0 +1,56 @@
+Autonomous Wall Follower
+(the first lidar project: “lidar stop with remote”, and this wall following project and the final
+projects can be demo’d by Monday and Wednesday April 27th and 29th) All late projects after
+April 29th will be demo’d during our allotted final exam time (May 4th 12pm).
+Core idea for this next project:
+The robot should drive on its own while maintaining a target distance from a wall on either
+the left or right side.
+This teaches:
+• closed-loop control
+• sensor interpretation
+• reactive autonomy
+• state-based behavior
+What the robot should do
+You should write a program so the robot can:
+• move forward autonomously
+• detect a wall on one chosen side
+• stay a set distance from that wall
+• avoid crashing into obstacles in front
+• recover if the wall is temporarily lost
+This should be a clean jump from the LIDAR safety-stop project.
+Project structure
+Basic version
+The robot should:
+• look at the front distance
+• look at the wall-side distance
+• try to keep the wall-side distance near a target value, put upper and lower
+thresholds so your robot is not having spasms.
+• turn away if it gets too close to the wall
+• turn towards if it gets too far from the wall
+• stop or sharply turn if something is directly in front
+Zones
+You can divide the LIDAR into simple angle regions.
+Example for right-wall follow:
+• front: 340–20 degrees
+• right: 250–290 degrees
+• maybe front-right: 290–340 degrees, use front-right and back-right angles so you
+can track the wall better.
+You do not need fancy mapping. Just use minimum or average distance in each zone.
+Simple behavior logic
+Case 1: obstacle in front
+If front is too close:
+• stop forward motion
+• turn left until front clears
+Case 2: wall is too close
+If distance is smaller than target:
+• steer away a little
+Case 3: wall is too far
+If distance is larger than target:
+• steer towards a little
+Case 4: no wall detected on right
+If the right side suddenly becomes very open:
+• gently turn right to search for the wall
+That is the complete project.
+Keep your journal logs and turn those in when you demo. All demos of this project must be
+done by Monday April 27th but remember there is a final project that will be due at the
+same time and it will .

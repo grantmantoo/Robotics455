@@ -42,6 +42,12 @@ class RobotControl:
         self.DRIVE_MIN = 800
         self.DRIVE_MAX = 1600  # safety cap
         self.TURN_BOOST = 1.2  # 20% extra turn power
+        # Wheel power trim to correct veer (left wheel is stronger).
+        self.LEFT_WHEEL_TRIM = 0.90
+        self.RIGHT_WHEEL_TRIM = 1.00
+        # Track last signed wheel commands for smooth decel stop.
+        self._last_left_speed = 0
+        self._last_right_speed = 0
 
         self.stop()  # start safe
 
@@ -50,12 +56,35 @@ class RobotControl:
     # -------------------------
     def stop(self):
         print("[CTRL] STOP/NEUTRAL")
+        self._last_left_speed = 0
+        self._last_right_speed = 0
         self.robot.stop()
+
+    def stop_smooth(self, duration_s=0.35, steps=5):
+        """
+        Decelerate wheel commands to zero to reduce tip-over risk.
+        """
+        steps = max(1, int(steps))
+        l0 = int(self._last_left_speed)
+        r0 = int(self._last_right_speed)
+
+        # If already stopped, keep behavior fast.
+        if l0 == 0 and r0 == 0:
+            self.stop()
+            return
+
+        for i in range(steps, 0, -1):
+            li = int(round(l0 * (i - 1) / steps))
+            ri = int(round(r0 * (i - 1) / steps))
+            self._drive_wheels(li, ri, update_last=False, enforce_motor_min=False)
+            if duration_s > 0:
+                time.sleep(duration_s / steps)
+        self.stop()
 
     # -------------------------
     # Driving
     # -------------------------
-    def drive(self, left_speed, right_speed):
+    def drive(self, left_speed, right_speed, enforce_deadband=True):
         """
         left_speed/right_speed are deltas from neutral (6000).
         Positive means "robot forward" for that wheel, negative means backward.
@@ -64,28 +93,55 @@ class RobotControl:
         left_speed = int(clamp(left_speed, -self.DRIVE_MAX, self.DRIVE_MAX))
         right_speed = int(clamp(right_speed, -self.DRIVE_MAX, self.DRIVE_MAX))
 
-        # enforce deadband: if nonzero magnitude < DRIVE_MIN, bump it up
-        if left_speed != 0 and abs(left_speed) < self.DRIVE_MIN:
-            left_speed = self.DRIVE_MIN if left_speed > 0 else -self.DRIVE_MIN
-        if right_speed != 0 and abs(right_speed) < self.DRIVE_MIN:
-            right_speed = self.DRIVE_MIN if right_speed > 0 else -self.DRIVE_MIN
+        # enforce deadband for manual teleop; can be disabled for autonomous control.
+        if enforce_deadband:
+            if left_speed != 0 and abs(left_speed) < self.DRIVE_MIN:
+                left_speed = self.DRIVE_MIN if left_speed > 0 else -self.DRIVE_MIN
+            if right_speed != 0 and abs(right_speed) < self.DRIVE_MIN:
+                right_speed = self.DRIVE_MIN if right_speed > 0 else -self.DRIVE_MIN
 
+        # Apply per-wheel trim so straight commands do not veer.
+        if left_speed != 0:
+            left_speed = int(round(left_speed * self.LEFT_WHEEL_TRIM))
+        if right_speed != 0:
+            right_speed = int(round(right_speed * self.RIGHT_WHEEL_TRIM))
+
+        # Final clamp after trim.
+        left_speed = int(clamp(left_speed, -self.DRIVE_MAX, self.DRIVE_MAX))
+        right_speed = int(clamp(right_speed, -self.DRIVE_MAX, self.DRIVE_MAX))
+
+        self._drive_wheels(left_speed, right_speed, update_last=True, enforce_motor_min=enforce_deadband)
+
+    def drive_autonomous(self, left_speed, right_speed):
+        # Allow fine low-speed corrections in wall-follow mode.
+        self.drive(left_speed, right_speed, enforce_deadband=False)
+
+    def _drive_wheels(self, left_speed, right_speed, update_last=True, enforce_motor_min=True):
         print(f"[CTRL] drive left={left_speed} right={right_speed}")
+        if update_last:
+            self._last_left_speed = int(left_speed)
+            self._last_right_speed = int(right_speed)
 
-        # Robot methods accept "speed" as positive magnitude, so we route signs here
-        if left_speed == 0:
-            self.robot.left_wheel.stop_motor()
-        elif left_speed > 0:
-            self.robot.left_wheel.forward(abs(left_speed))
+        # Use signed drive so autonomous mode can bypass motor min-delta clamp.
+        if hasattr(self.robot.left_wheel, "drive_signed"):
+            self.robot.left_wheel.drive_signed(left_speed, enforce_min=enforce_motor_min)
         else:
-            self.robot.left_wheel.backward(abs(left_speed))
+            if left_speed == 0:
+                self.robot.left_wheel.stop_motor()
+            elif left_speed > 0:
+                self.robot.left_wheel.forward(abs(left_speed))
+            else:
+                self.robot.left_wheel.backward(abs(left_speed))
 
-        if right_speed == 0:
-            self.robot.right_wheel.stop_motor()
-        elif right_speed > 0:
-            self.robot.right_wheel.forward(abs(right_speed))
+        if hasattr(self.robot.right_wheel, "drive_signed"):
+            self.robot.right_wheel.drive_signed(right_speed, enforce_min=enforce_motor_min)
         else:
-            self.robot.right_wheel.backward(abs(right_speed))
+            if right_speed == 0:
+                self.robot.right_wheel.stop_motor()
+            elif right_speed > 0:
+                self.robot.right_wheel.forward(abs(right_speed))
+            else:
+                self.robot.right_wheel.backward(abs(right_speed))
 
     def forward(self, speed=800):
         print(f"[CTRL] forward speed={speed}")

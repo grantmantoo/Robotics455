@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, render_template
 from robot_control import RobotControl
 from dialog_engine import DialogEngine
 from action_runner import ActionRunner
+from wall_follower import WallFollower
 try:
     from lidar_safety import LidarSafetyMonitor
     LIDAR_IMPORT_ERROR = None
@@ -16,6 +17,7 @@ import subprocess
 import re
 import time
 import os
+import random
 import argparse
 from typing import Optional
 
@@ -36,6 +38,7 @@ dialog_engine = None
 action_runner = None
 dialog_state_override = None
 lidar_monitor = None
+wall_follower = None
 LIDAR_CLEAR_SCANS_REQUIRED = 3
 LIDAR_MOTION_GUARD_PERIOD_S = 0.1
 
@@ -113,6 +116,13 @@ def _get_motion_command():
         return _motion_left, _motion_right, _motion_active
 
 
+def _stop_wall_follower_if_active(reason: str):
+    global wall_follower
+    if wall_follower is not None and wall_follower.active:
+        print(f"[WALL] stopping due to {reason}")
+        wall_follower.stop()
+
+
 # =========================
 # Watchdog / Force Stop
 # =========================
@@ -145,12 +155,13 @@ def run_force_stop_async(reason: str):
         global _force_stop_running
         try:
             print(f"[WATCHDOG] FORCE STOP triggered: {reason}")
+            _stop_wall_follower_if_active("watchdog force stop")
             if action_runner is not None:
                 action_runner.interrupt()
             if dialog_engine is not None:
                 dialog_engine.reset_to_idle("watchdog force stop")
             try:
-                ctrl.stop()
+                ctrl.stop_smooth()
             except Exception as e:
                 print(f"[WATCHDOG] ctrl.stop() failed: {e}")
 
@@ -210,7 +221,7 @@ def lidar_motion_guard_loop():
 
         direction = "forward" if linear > 0 else "backward"
         try:
-            ctrl.stop()
+            ctrl.stop_smooth()
             _clear_motion_command()
             print(
                 f"[LIDAR SAFETY] forced stop while moving direction={direction} "
@@ -281,6 +292,7 @@ def api_force_stop():
 @app.route("/api/drive", methods=["POST"])
 def api_drive():
     touch_heartbeat()  # treat commands as “activity” too
+    _stop_wall_follower_if_active("manual /api/drive")
 
     data = request.get_json(silent=True) or {}
     if "left" not in data or "right" not in data:
@@ -298,7 +310,7 @@ def api_drive():
     try:
         blocked, direction, lidar_status = _lidar_block_for_motion(left, right)
         if blocked:
-            ctrl.stop()
+            ctrl.stop_smooth()
             _clear_motion_command()
             print(f"[LIDAR SAFETY] blocked {direction} drive command left={left} right={right}")
             return jsonify(
@@ -323,6 +335,7 @@ def api_drive():
 @app.route("/api/forward", methods=["POST"])
 def api_forward():
     touch_heartbeat()
+    _stop_wall_follower_if_active("manual /api/forward")
     data = request.get_json(silent=True) or {}
     try:
         speed = int(data.get("speed", 800))
@@ -332,7 +345,7 @@ def api_forward():
         if lidar_monitor is not None:
             s = lidar_monitor.status()
             if s["front_blocked"]:
-                ctrl.stop()
+                ctrl.stop_smooth()
                 _clear_motion_command()
                 print(f"[LIDAR SAFETY] blocked forward speed={speed}")
                 return jsonify({"ok": True, "blocked": True, "direction": "forward", "speed": 0, "lidar": s})
@@ -347,6 +360,7 @@ def api_forward():
 @app.route("/api/backward", methods=["POST"])
 def api_backward():
     touch_heartbeat()
+    _stop_wall_follower_if_active("manual /api/backward")
     data = request.get_json(silent=True) or {}
     try:
         speed = int(data.get("speed", 800))
@@ -356,7 +370,7 @@ def api_backward():
         if lidar_monitor is not None:
             s = lidar_monitor.status()
             if s["rear_blocked"]:
-                ctrl.stop()
+                ctrl.stop_smooth()
                 _clear_motion_command()
                 print(f"[LIDAR SAFETY] blocked backward speed={speed}")
                 return jsonify({"ok": True, "blocked": True, "direction": "backward", "speed": 0, "lidar": s})
@@ -371,6 +385,7 @@ def api_backward():
 @app.route("/api/turn_left", methods=["POST"])
 def api_turn_left():
     touch_heartbeat()
+    _stop_wall_follower_if_active("manual /api/turn_left")
     data = request.get_json(silent=True) or {}
     try:
         speed = int(data.get("speed", 800))
@@ -388,6 +403,7 @@ def api_turn_left():
 @app.route("/api/turn_right", methods=["POST"])
 def api_turn_right():
     touch_heartbeat()
+    _stop_wall_follower_if_active("manual /api/turn_right")
     data = request.get_json(silent=True) or {}
     try:
         speed = int(data.get("speed", 800))
@@ -405,6 +421,7 @@ def api_turn_right():
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     touch_heartbeat()
+    _stop_wall_follower_if_active("manual /api/stop")
     try:
         if action_runner is not None:
             action_runner.interrupt()
@@ -421,6 +438,7 @@ def api_stop():
 @app.route("/api/center", methods=["POST"])
 def api_center():
     touch_heartbeat()
+    _stop_wall_follower_if_active("manual /api/center")
     try:
         ctrl.center_pose()
         _clear_motion_command()
@@ -430,15 +448,93 @@ def api_center():
     return jsonify({"ok": True})
 
 
+@app.route("/api/geeked", methods=["POST"])
+def api_geeked():
+    touch_heartbeat()
+    _stop_wall_follower_if_active("manual /api/geeked")
+    try:
+        _clear_motion_command()
+        ctrl.stop()
+
+        limits = getattr(ctrl, "SERVO_LIMITS", {})
+
+        def rand_joint(name, move_fn):
+            lo, hi = limits.get(name, (2000, 8000))
+            # Keep values on coarse steps to avoid jittery tiny moves.
+            value = random.randrange(lo, hi + 1, 50)
+            move_fn(value)
+            return value
+
+        values = {
+            "head_pan": rand_joint("head_pan", ctrl.head_pan),
+            "head_tilt": rand_joint("head_tilt", ctrl.head_tilt),
+            "waist": rand_joint("waist", ctrl.waist),
+            "right_shoulder_ud": rand_joint("right_shoulder_ud", ctrl.right_shoulder_ud),
+            "right_shoulder_yaw": rand_joint("right_shoulder_yaw", ctrl.right_shoulder_yaw),
+            "right_elbow_ud": rand_joint("right_elbow_ud", ctrl.right_elbow_ud),
+            "right_wrist_ud": rand_joint("right_wrist_ud", ctrl.right_wrist_ud),
+            "right_wrist_rot": rand_joint("right_wrist_rot", ctrl.right_wrist_rot),
+            "right_hand_pinch": rand_joint("right_hand_pinch", ctrl.right_hand_pinch),
+            "left_shoulder_ud": rand_joint("left_shoulder_ud", ctrl.left_shoulder_ud),
+            "left_shoulder_yaw": rand_joint("left_shoulder_yaw", ctrl.left_shoulder_yaw),
+            "left_elbow_ud": rand_joint("left_elbow_ud", ctrl.left_elbow_ud),
+            "left_wrist_ud": rand_joint("left_wrist_ud", ctrl.left_wrist_ud),
+            "left_wrist_rot": rand_joint("left_wrist_rot", ctrl.left_wrist_rot),
+            "left_hand_pinch": rand_joint("left_hand_pinch", ctrl.left_hand_pinch),
+        }
+    except Exception as e:
+        run_force_stop_async(f"geeked exception: {e}")
+        return bad(f"geeked failed: {e}", code=500)
+    return jsonify({"ok": True, "values": values})
+
+
 @app.route("/api/all_neutral", methods=["POST"])
 def api_all_neutral():
     touch_heartbeat()
+    _stop_wall_follower_if_active("manual /api/all_neutral")
     try:
         ctrl.all_servos_neutral()
         _clear_motion_command()
+        values = dict(ctrl.robot.SERVO_NEUTRALS)
     except Exception as e:
         run_force_stop_async(f"all_neutral exception: {e}")
         return bad(f"all_neutral failed: {e}", code=500)
+    return jsonify({"ok": True, "values": values})
+
+
+@app.route("/api/six_seven", methods=["POST"])
+def api_six_seven():
+    touch_heartbeat()
+    _stop_wall_follower_if_active("manual /api/six_seven")
+    try:
+        ctrl.all_servos_neutral()
+        _clear_motion_command()
+        phrase = "six seven six seven six seven six seven six seven"
+        speak_async(phrase)
+
+        l0 = ctrl.robot.servo_neutral("left_elbow_ud")
+        r0 = ctrl.robot.servo_neutral("right_elbow_ud")
+        l_up = ctrl._servo_clamp("left_elbow_ud", l0 + 700)
+        r_up = ctrl._servo_clamp("right_elbow_ud", r0 + 700)
+
+        hold_s = 0.22
+        for _ in range(11):
+            # Left up, right down.
+            ctrl.left_elbow_ud(l_up)
+            ctrl.right_elbow_ud(r0)
+            time.sleep(hold_s)
+
+            # Right up, left down.
+            ctrl.left_elbow_ud(l0)
+            ctrl.right_elbow_ud(r_up)
+            time.sleep(hold_s)
+
+        # Return to neutral.
+        ctrl.left_elbow_ud(l0)
+        ctrl.right_elbow_ud(r0)
+    except Exception as e:
+        run_force_stop_async(f"six_seven exception: {e}")
+        return bad(f"six_seven failed: {e}", code=500)
     return jsonify({"ok": True})
 
 
@@ -630,9 +726,85 @@ def api_lidar_status():
     return jsonify({"ok": True, "lidar": lidar_monitor.status()})
 
 
+@app.route("/api/wall_follow/start", methods=["POST"])
+def api_wall_follow_start():
+    touch_heartbeat()
+    global wall_follower
+    if lidar_monitor is None:
+        return bad("lidar monitor not configured", code=500)
+    if wall_follower is None:
+        wall_follower = WallFollower(ctrl, lidar_monitor)
+
+    try:
+        data = request.get_json(silent=True) or {}
+        side = str(data.get("side", "right")).lower().strip()
+        target_mm = int(data.get("target_mm", 1000))
+        tolerance_mm = int(data.get("tolerance_mm", 150))
+        set_speed_raw = data.get("set_speed", data.get("base_speed", 1000))
+        base_speed = max(1000, int(set_speed_raw))
+        correction_band = int(data.get("correction_band", data.get("delta", 200)))
+        steer_delta = int(data.get("steer_delta", 260))
+        steer_min = int(data.get("steer_min", 80))
+        steer_max = int(data.get("steer_max", 200))
+        steer_kp = float(data.get("steer_kp", 0.25))
+        turn_gain = float(data.get("turn_gain", 1.35))
+        search_delta = int(data.get("search_delta", 120))
+        front_stop_mm = int(data.get("front_stop_mm", 320))
+        front_emergency_mm = int(data.get("front_emergency_mm", 300))
+        front_slow_mm = int(data.get("front_slow_mm", 800))
+        lost_wall_mm = int(data.get("lost_wall_mm", 2400))
+        reverse_time_s = float(data.get("reverse_time_s", 0.35))
+        turn_time_s = float(data.get("turn_time_s", 0.45))
+        _clear_motion_command()
+        wall_follower.start(
+            side=side,
+            target_mm=target_mm,
+            tolerance_mm=tolerance_mm,
+            base_speed=base_speed,
+            correction_band=correction_band,
+            steer_delta=steer_delta,
+            steer_min=steer_min,
+            steer_max=steer_max,
+            steer_kp=steer_kp,
+            turn_gain=turn_gain,
+            search_delta=search_delta,
+            front_stop_mm=front_stop_mm,
+            front_emergency_mm=front_emergency_mm,
+            front_slow_mm=front_slow_mm,
+            lost_wall_mm=lost_wall_mm,
+            reverse_time_s=reverse_time_s,
+            turn_time_s=turn_time_s,
+        )
+    except Exception as e:
+        return bad(f"wall follow start failed: {e}", code=400)
+
+    return jsonify({"ok": True, "wall_follow": wall_follower.status()})
+
+
+@app.route("/api/wall_follow/stop", methods=["POST"])
+def api_wall_follow_stop():
+    touch_heartbeat()
+    global wall_follower
+    try:
+        if wall_follower is not None:
+            wall_follower.stop()
+        _clear_motion_command()
+    except Exception as e:
+        return bad(f"wall follow stop failed: {e}", code=500)
+    return jsonify({"ok": True, "wall_follow": wall_follower.status() if wall_follower else {"active": False}})
+
+
+@app.route("/api/wall_follow/status", methods=["GET"])
+def api_wall_follow_status():
+    if wall_follower is None:
+        return jsonify({"ok": True, "wall_follow": {"active": False, "last_state": "NOT_STARTED"}})
+    return jsonify({"ok": True, "wall_follow": wall_follower.status()})
+
+
 @app.route("/api/dialog_input", methods=["POST"])
 def api_dialog_input():
     touch_heartbeat()
+    _stop_wall_follower_if_active("dialog input")
     if dialog_engine is None:
         return bad("dialog engine not configured", code=500)
 
@@ -725,6 +897,7 @@ if __name__ == "__main__":
             clear_scans_required=LIDAR_CLEAR_SCANS_REQUIRED,
         )
         lidar_monitor.start()
+        wall_follower = WallFollower(ctrl, lidar_monitor)
         print(
             f"[LIDAR] monitor started port={args.lidar_port} stop_mm={args.lidar_stop_mm} "
             f"clear_scans_required={LIDAR_CLEAR_SCANS_REQUIRED}"
