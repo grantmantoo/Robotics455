@@ -752,6 +752,12 @@ def api_wall_follow_start():
         front_stop_mm = int(data.get("front_stop_mm", 320))
         front_emergency_mm = int(data.get("front_emergency_mm", 300))
         front_slow_mm = int(data.get("front_slow_mm", 800))
+        front_turn_start_mm = int(data.get("front_turn_start_mm", 950))
+        front_turn_full_mm = int(data.get("front_turn_full_mm", 420))
+        front_turn_max = int(data.get("front_turn_max", 1100))
+        front_turn_center_weight = float(data.get("front_turn_center_weight", 0.65))
+        front_turn_curve = float(data.get("front_turn_curve", 2.2))
+        front_diag_weight = float(data.get("front_diag_weight", 0.90))
         lost_wall_mm = int(data.get("lost_wall_mm", 2400))
         reverse_time_s = float(data.get("reverse_time_s", 0.35))
         turn_time_s = float(data.get("turn_time_s", 0.45))
@@ -771,6 +777,12 @@ def api_wall_follow_start():
             front_stop_mm=front_stop_mm,
             front_emergency_mm=front_emergency_mm,
             front_slow_mm=front_slow_mm,
+            front_turn_start_mm=front_turn_start_mm,
+            front_turn_full_mm=front_turn_full_mm,
+            front_turn_max=front_turn_max,
+            front_turn_center_weight=front_turn_center_weight,
+            front_turn_curve=front_turn_curve,
+            front_diag_weight=front_diag_weight,
             lost_wall_mm=lost_wall_mm,
             reverse_time_s=reverse_time_s,
             turn_time_s=turn_time_s,

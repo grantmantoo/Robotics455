@@ -42,6 +42,12 @@ class WallFollower:
         self.front_emergency_mm = 300
         self.front_slow_mm = 800
         self.front_min_scale = 0.30
+        self.front_turn_start_mm = 950
+        self.front_turn_full_mm = 420
+        self.front_turn_max = 1100
+        self.front_turn_center_weight = 0.65
+        self.front_turn_curve = 2.2
+        self.front_diag_weight = 0.90
         self.lost_wall_mm = 2400
         self.loop_period_s = 0.06
         self.reverse_time_s = 0.35
@@ -81,6 +87,12 @@ class WallFollower:
         front_emergency_mm: int = 300,
         front_slow_mm: int = 800,
         front_min_scale: float = 0.30,
+        front_turn_start_mm: int = 950,
+        front_turn_full_mm: int = 420,
+        front_turn_max: int = 1100,
+        front_turn_center_weight: float = 0.65,
+        front_turn_curve: float = 2.2,
+        front_diag_weight: float = 0.90,
         lost_wall_mm: int = 2400,
         reverse_time_s: float = 0.35,
         turn_time_s: float = 0.45,
@@ -111,6 +123,15 @@ class WallFollower:
             self.front_emergency_mm = min(self.front_stop_mm, int(front_emergency_mm))
             self.front_slow_mm = max(self.front_stop_mm + 50, int(front_slow_mm))
             self.front_min_scale = _clamp(int(front_min_scale * 100), 10, 90) / 100.0
+            self.front_turn_start_mm = max(self.front_stop_mm + 100, int(front_turn_start_mm))
+            self.front_turn_full_mm = max(
+                self.front_emergency_mm + 20,
+                min(int(front_turn_full_mm), self.front_turn_start_mm - 50),
+            )
+            self.front_turn_max = int(_clamp(int(front_turn_max), 0, 1600))
+            self.front_turn_center_weight = _clamp(int(front_turn_center_weight * 100), 0, 100) / 100.0
+            self.front_turn_curve = max(1.0, float(front_turn_curve))
+            self.front_diag_weight = _clamp(int(front_diag_weight * 100), 25, 150) / 100.0
             self.lost_wall_mm = int(lost_wall_mm)
             self.reverse_time_s = float(reverse_time_s)
             self.turn_time_s = float(turn_time_s)
@@ -203,6 +224,64 @@ class WallFollower:
             right = int(round(right * scale))
         self._issue_drive(left, right, state)
 
+    def _effective_front_distance(
+        self,
+        front_mm: Optional[float],
+        front_left_mm: Optional[float],
+        front_right_mm: Optional[float],
+    ) -> Optional[float]:
+        distances = []
+        if front_mm is not None:
+            distances.append(float(front_mm))
+        if front_left_mm is not None:
+            distances.append(float(front_left_mm) / self.front_diag_weight)
+        if front_right_mm is not None:
+            distances.append(float(front_right_mm) / self.front_diag_weight)
+        if not distances:
+            return None
+        return min(distances)
+
+    def _proximity_ratio(self, distance_mm: Optional[float], start_mm: int, full_mm: int) -> float:
+        if distance_mm is None:
+            return 0.0
+        d = float(distance_mm)
+        if d >= float(start_mm):
+            return 0.0
+        if d <= float(full_mm):
+            return 1.0
+        span = max(1.0, float(start_mm - full_mm))
+        return (float(start_mm) - d) / span
+
+    def _front_turn_bias(self, front_mm: Optional[float], front_side_mm: Optional[float], front_corner_mm: Optional[float]) -> int:
+        side_ratio = self._proximity_ratio(front_side_mm, self.front_turn_start_mm, self.front_turn_full_mm)
+        center_ratio = self._proximity_ratio(front_mm, self.front_turn_start_mm, self.front_turn_full_mm)
+        corner_ratio = self._proximity_ratio(front_corner_mm, self.front_turn_start_mm, self.front_turn_full_mm)
+        combined = max(side_ratio, center_ratio * self.front_turn_center_weight)
+        combined = max(combined, corner_ratio)
+        if combined <= 0.0:
+            return 0
+        shaped = combined ** self.front_turn_curve
+        return int(round(self.front_turn_max * shaped))
+
+    def _compose_track_drive(self, turn_cmd: int) -> tuple[int, int]:
+        cmd = int(_clamp(turn_cmd, -1600, 1600))
+        base_delta = min(abs(cmd), self.correction_band)
+        extra_pivot = max(0, abs(cmd) - self.correction_band)
+
+        if cmd >= 0:
+            fast = self.base_speed + base_delta
+            slow = self.base_speed - base_delta - extra_pivot
+        else:
+            fast = self.base_speed + base_delta
+            slow = self.base_speed - base_delta - extra_pivot
+
+        fast = int(_clamp(fast, -1600, 1600))
+        slow = int(_clamp(slow, -1600, 1600))
+
+        if self.side == "right":
+            return (fast, slow) if cmd >= 0 else (slow, fast)
+        return (slow, fast) if cmd >= 0 else (fast, slow)
+
     def _log_cycle(
         self,
         left_mm: Optional[float],
@@ -240,12 +319,16 @@ class WallFollower:
                 else:
                     front_side = front_left
                     back_side = back_left
+                front_effective = self._effective_front_distance(front, front_left, front_right)
+                front_corner = front_left
+                if front_corner is None or (front_right is not None and float(front_right) < float(front_corner)):
+                    front_corner = front_right
 
                 self.last_front_mm = front
                 self.last_side_mm = side_dist
 
                 # Global emergency override only for imminent collision.
-                if front is not None and front < self.front_emergency_mm:
+                if front_effective is not None and front_effective < self.front_emergency_mm:
                     self._issue_drive(-self.base_speed, -self.base_speed, "FRONT_EMERGENCY_REVERSE")
                     self._log_cycle(left_dist, right_dist, side_dist, front)
                     time.sleep(self.reverse_time_s)
@@ -271,7 +354,11 @@ class WallFollower:
                     continue
 
                 # Front stop fallback only when side wall data is unavailable.
-                if (side_dist is None or side_dist > self.lost_wall_mm) and front is not None and front < self.front_stop_mm:
+                if (
+                    (side_dist is None or side_dist > self.lost_wall_mm)
+                    and front_effective is not None
+                    and front_effective < self.front_stop_mm
+                ):
                     # Perpendicular-wall recovery:
                     # 1) back up briefly
                     # 2) commit to one turn direction (prefer open side)
@@ -336,6 +423,10 @@ class WallFollower:
                 if abs(toward_cmd) <= self.turn_deadband:
                     toward_cmd = 0
 
+                front_turn_bias = self._front_turn_bias(front_effective, front_side, front_corner)
+                if front_turn_bias > 0:
+                    toward_cmd = min(toward_cmd, -front_turn_bias)
+
                 # Corner boost: if side distance jumps by more than target in one cycle,
                 # force a strong turn to account for sharp corners.
                 corner_triggered = False
@@ -354,12 +445,7 @@ class WallFollower:
                         corner_triggered = True
                 self._prev_side_dist_mm = float(side_dist)
 
-                if self.side == "right":
-                    left_cmd = self._band_clamp(self.base_speed + toward_cmd)
-                    right_cmd = self._band_clamp(self.base_speed - toward_cmd)
-                else:
-                    left_cmd = self._band_clamp(self.base_speed - toward_cmd)
-                    right_cmd = self._band_clamp(self.base_speed + toward_cmd)
+                left_cmd, right_cmd = self._compose_track_drive(toward_cmd)
 
                 if toward_cmd == 0:
                     state = "TRACK_OK_FORWARD"
@@ -369,8 +455,10 @@ class WallFollower:
                     state = "TRACK_AWAY_FROM_WALL"
                 if corner_triggered:
                     state = f"{state}_CORNER_BOOST"
+                elif front_turn_bias > 0:
+                    state = f"{state}_FRONT_BIAS"
 
-                self._issue_forward_drive(left_cmd, right_cmd, front, state)
+                self._issue_forward_drive(left_cmd, right_cmd, front_effective, state)
                 self._last_error_mm = dist_err
                 self._log_cycle(left_dist, right_dist, side_dist, front)
 
@@ -412,6 +500,12 @@ class WallFollower:
                 "front_emergency_mm": self.front_emergency_mm,
                 "front_slow_mm": self.front_slow_mm,
                 "front_min_scale": self.front_min_scale,
+                "front_turn_start_mm": self.front_turn_start_mm,
+                "front_turn_full_mm": self.front_turn_full_mm,
+                "front_turn_max": self.front_turn_max,
+                "front_turn_center_weight": self.front_turn_center_weight,
+                "front_turn_curve": self.front_turn_curve,
+                "front_diag_weight": self.front_diag_weight,
                 "lost_wall_mm": self.lost_wall_mm,
                 "reverse_time_s": self.reverse_time_s,
                 "turn_time_s": self.turn_time_s,
