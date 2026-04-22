@@ -1,6 +1,6 @@
 python3 local_vosk_listener.py \
   --server http://172.20.10.2:5000 \
-  --model /Users/grantfrandsen/Downloads/vosk-model-small-en-us-0.15
+  --model vosk-model-small-en-us-0.15
 
 
 python3 local_vosk_listener.py \
