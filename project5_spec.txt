@@ -1,0 +1,248 @@
+Project 5 Technical Spec: Autonomous Robot Greeter
+
+Goal
+Build a state-based autonomous greeter that waits for a person, asks where they want
+to go, navigates using LIDAR wall following, detects the T-intersection, turns toward
+the requested destination, drives the final segment, stops, and announces arrival.
+
+Final Demo Requirement Summary
+The robot must:
+- Detect a human approaching from the front.
+- Greet the human.
+- Accept a destination command for bathroom or robot lab.
+- Turn around from the start position.
+- Align itself in the hallway.
+- Wall-follow toward the T-intersection.
+- Stop or wait for front obstacles at all times.
+- Detect the T-intersection using LIDAR.
+- Turn toward the correct destination.
+- Drive the final segment for about 5 seconds.
+- Stop and announce arrival.
+
+Required FSM States
+Use a finite state machine with these states:
+- WAITING
+- GREETING
+- LISTENING
+- TURNING_AROUND
+- ALIGNING_TO_HALLWAY
+- MOVING_TO_T
+- TURNING_TO_DESTINATION
+- FINAL_MOVEMENT
+- STOPPED
+
+Optional useful internal states:
+- OBSTACLE_WAIT
+- ERROR
+- MANUAL_OVERRIDE
+
+State Behavior
+
+WAITING
+- Robot is stopped.
+- LIDAR monitor is active.
+- Watch the front zone for a likely human approach.
+- Transition to GREETING when front distance is inside the human detection range for
+  several scans.
+
+GREETING
+- Speak: "Hello, how can I help you?"
+- Transition to LISTENING after speech begins or after a short delay.
+
+LISTENING
+- Listen for one of the supported commands:
+  - "I am looking for the bathroom"
+  - "I am looking for the robot lab"
+- Full-credit path: speech recognition using local or online speech input.
+- Fallback path: typed command, with the 15 point speech penalty noted in the log.
+- Parse destination into one of:
+  - bathroom
+  - robot_lab
+- Speak: "Follow me."
+- Transition to TURNING_AROUND.
+
+TURNING_AROUND
+- Pivot 180 degrees.
+- Use a timed turn initially, then refine with real-world testing.
+- Stop after the turn.
+- Transition to ALIGNING_TO_HALLWAY.
+
+ALIGNING_TO_HALLWAY
+- Move forward slowly until LIDAR sees side walls on both left and right.
+- This confirms the robot is in the hallway corridor.
+- If a front obstacle appears, stop and wait.
+- Transition to MOVING_TO_T when both side walls are detected.
+
+MOVING_TO_T
+- Start wall following using the Project 4 wall follower.
+- Use the final-demo profile by default:
+  - right wall follow: final_right
+  - left wall follow: final_left
+- Maintain approximate hallway centering by tracking side distance and heading.
+- Stop and wait if a human or object is detected in front.
+- Transition to TURNING_TO_DESTINATION when wall follower status reports
+  T_INTERSECTION_DETECTED.
+
+TURNING_TO_DESTINATION
+- Use the parsed destination to decide the turn:
+  - bathroom: turn right
+  - robot_lab: turn left or continue, depending on the chosen hallway map strategy
+- For the current simple map, prefer:
+  - bathroom: right timed pivot
+  - robot_lab: left timed pivot
+- Stop after the turn.
+- Transition to FINAL_MOVEMENT.
+
+FINAL_MOVEMENT
+- Drive forward for about 5 seconds.
+- Continue enforcing front obstacle stops.
+- If an obstacle appears, pause the timer while waiting.
+- Transition to STOPPED after final movement completes.
+
+STOPPED
+- Stop wheels.
+- Speak:
+  - "We have arrived at the bathroom."
+  - "We have arrived at the robot lab."
+- Return to WAITING only after manual reset or explicit restart.
+
+LIDAR Requirements
+
+Use LIDAR for:
+- Front human detection.
+- Front obstacle detection.
+- Left wall distance.
+- Right wall distance.
+- T-intersection detection.
+
+Existing LIDAR zones in lidar_safety.py:
+- front / front_center
+- front_left
+- front_right
+- left
+- right
+- back_left
+- back_right
+
+Human Detection Starting Point
+Treat a human as detected when:
+- front_center or front is present, and
+- distance is roughly between 500 mm and 1800 mm, and
+- the reading persists for multiple scans.
+
+This avoids triggering immediately on far walls and avoids triggering on a one-scan
+noise spike.
+
+Obstacle Handling
+At all times during autonomous driving:
+- If front distance is too close, stop or wait.
+- Do not drive forward while front_blocked is true.
+- Emergency close readings may reverse briefly, but the final demo path should prefer
+  stopping and waiting for a person in front.
+
+T-Intersection Detection
+Detect the T when:
+- front distance is within the intersection front threshold, and
+- left wall is missing/open, and
+- right wall is missing/open, and
+- this pattern persists for several scans.
+
+Current Project 4 wall follower support:
+- last_state becomes T_INTERSECTION_DETECTED.
+- last_intersection_detected becomes true.
+- wheel command becomes zero.
+
+Wall Following Defaults
+
+Use named profiles instead of manual tuning during the demo.
+
+Final demo profile:
+- target_mm: 900
+- tolerance_mm: 160
+- base_speed: 1000
+- correction_band: 220
+- turn_gain: 1.30
+- heading_kp: 0.42
+- obstacle_stop_mm: 650
+- obstacle_clear_mm: 850
+- intersection_front_mm: 950
+- intersection_open_mm: 2200
+- intersection_confirm_scans: 3
+
+Available profile names:
+- final_right
+- final_left
+- cautious_right
+- cautious_left
+
+Recommended testing order:
+1. Test cautious_right near a simple wall.
+2. Test cautious_left near a simple wall.
+3. Test final_right in a hallway or fake hallway.
+4. Test final_left in a hallway or fake hallway.
+5. Test T-intersection detection with boxes or hallway walls.
+6. Test obstacle wait by stepping in front.
+
+Backend Integration
+
+Existing useful endpoints:
+- POST /api/wall_follow/start
+- POST /api/wall_follow/stop
+- GET /api/wall_follow/status
+- GET /api/lidar_status
+- POST /api/speak_text
+- POST /api/drive
+- POST /api/stop
+
+Project 5 should add endpoints similar to:
+- POST /api/final/start
+- POST /api/final/stop
+- GET /api/final/status
+- POST /api/final/command
+
+The final FSM should own autonomous navigation. Manual drive, stop, dialog input, or
+force stop should interrupt the final FSM and stop the wheels.
+
+Speech Recognition
+
+Full-credit option:
+- Use speech recognition from the Bluetooth microphone, laptop microphone, or online
+  service.
+- Parse recognized text with simple keyword rules:
+  - bathroom: bathroom, restroom, washroom
+  - robot_lab: robot lab, robotics lab, lab
+
+Fallback option:
+- Use typed command in the browser.
+- Clearly state in the project log that typed input was used.
+
+Safety Rules
+
+- STOP button must always stop wheels.
+- Watchdog heartbeat should keep stopping the robot if the browser disconnects.
+- Any manual drive command should stop wall following and final FSM navigation.
+- Any front obstacle while moving forward should stop or wait.
+- Keep speed conservative until the path is reliable.
+
+Project Log Notes To Capture
+
+Include:
+- FSM diagram or state list.
+- How each transition works.
+- Wall-following logic and default values.
+- T-intersection detection thresholds.
+- Obstacle handling behavior.
+- Speech recognition choice.
+- Issues found during testing.
+- Final tuned values for left and right wall follow.
+
+Open Tuning Items
+
+- Confirm whether right-wall or left-wall following is more reliable in the actual
+  hallway.
+- Tune timed 180 degree turn.
+- Tune destination turn durations.
+- Tune final forward duration or replace with distance-based movement if LIDAR
+  behavior is reliable enough.
+- Confirm T-intersection thresholds in the real hallway.
+- Decide whether robot lab means turn left or continue for the chosen map path.

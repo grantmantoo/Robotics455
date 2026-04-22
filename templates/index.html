@@ -54,6 +54,12 @@
       white-space: pre-wrap;
       font-size: 14px;
     }
+    .speech-status {
+      margin-top: 8px;
+      font-size: 13px;
+      color: #333;
+      min-height: 20px;
+    }
     .joint-row {
       margin-top: 10px;
       padding-top: 8px;
@@ -304,15 +310,45 @@
         <button onclick="sendDialog()">Send</button>
       </div>
       <div style="margin-top:10px;">
+        <button id="speechStartBtn" onclick="startSpeechRecognition()">Start Listening</button>
+        <button id="speechStopBtn" onclick="stopSpeechRecognition()" disabled>Stop Listening</button>
+      </div>
+      <div style="margin-top:8px;">
+        <label>
+          <input id="speechAutoSend" type="checkbox" checked />
+          Send final transcript automatically
+        </label>
+      </div>
+      <div id="speechStatus" class="speech-status">Speech recognition not started.</div>
+      <div style="margin-top:10px;">
         <button onclick="post('/api/stop', {})">Global STOP</button>
         <button onclick="refreshDialogState()">Refresh State</button>
       </div>
       <div id="dialogOutput" class="dialog-output">No dialog input yet.</div>
     </div>
 
+    <!-- Final Project Demo -->
+    <div class="card">
+      <div class="big">Final Project Demo</div>
+      <div style="margin-top:10px;">
+        <button onclick="startFinalDemo()">Start Demo</button>
+        <button onclick="stopFinalDemo()">Stop Demo</button>
+        <button onclick="refreshFinalStatus()">Refresh</button>
+      </div>
+      <div id="finalDemoOutput" class="dialog-output">Final demo idle.</div>
+    </div>
+
     <!-- Wall Follower -->
     <div class="card">
       <div class="big">Wall Follower (Project 4)</div>
+      <div style="margin-top:8px;">
+        Profile:
+        <select id="wfProfile" onchange="applyWallFollowPreset()">
+          <option value="final" selected>Final demo default</option>
+          <option value="cautious">Cautious test</option>
+          <option value="manual">Manual tweaks</option>
+        </select>
+      </div>
       <div style="margin-top:8px;">
         Side:
         <select id="wfSide">
@@ -321,8 +357,8 @@
         </select>
       </div>
       <div style="margin-top:8px;">
-        Target mm: <input id="wfTarget" type="number" value="1000" style="width:90px;" />
-        Tol mm: <input id="wfTol" type="number" value="150" style="width:90px;" />
+        Target mm: <input id="wfTarget" type="number" value="900" style="width:90px;" />
+        Tol mm: <input id="wfTol" type="number" value="160" style="width:90px;" />
       </div>
       <div style="margin-top:8px;">
         Set speed:
@@ -332,10 +368,10 @@
       </div>
       <div style="margin-top:8px;">
         Delta (+/-):
-        <input id="wfDelta" type="range" min="100" max="300" step="10" value="200"
+        <input id="wfDelta" type="range" min="100" max="320" step="10" value="220"
                oninput="syncWallSpeedInputs()" style="width:220px;" />
-        <span id="wfDeltaVal">200</span>
-        <span id="wfBandVal" style="margin-left:8px; color:#bbb;">(range 800..1200)</span>
+        <span id="wfDeltaVal">220</span>
+        <span id="wfBandVal" style="margin-left:8px; color:#bbb;">(range 780..1220)</span>
       </div>
       <div style="margin-top:10px;">
         <button onclick="startWallFollow()">Start Wall Follow</button>
@@ -390,7 +426,22 @@
     document.getElementById("status").textContent = msg;
   }
 
-  syncWallSpeedInputs();
+  const WALL_FOLLOW_PRESETS = {
+    final: {
+      target_mm: 900,
+      tolerance_mm: 160,
+      set_speed: 1000,
+      correction_band: 220
+    },
+    cautious: {
+      target_mm: 1000,
+      tolerance_mm: 180,
+      set_speed: 1000,
+      correction_band: 180
+    }
+  };
+
+  applyWallFollowPreset();
 
   const JOINT_LIMITS = {
     head_pan: [4000, 8000],
@@ -549,10 +600,167 @@
     post("/api/speak_text", { text });
   }
 
+  // ----------------------------------------
+  // Browser speech recognition -> dialog text
+  // ----------------------------------------
+  let speechRecognition = null;
+  let speechActive = false;
+  let speechShouldListen = false;
+  let speechHasTranscript = false;
+  let speechRestartTimer = null;
+
+  function getSpeechRecognitionCtor() {
+    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+  }
+
+  function setSpeechStatus(msg) {
+    const el = document.getElementById("speechStatus");
+    if (el) el.textContent = msg;
+  }
+
+  function setSpeechButtonState(listening) {
+    const startBtn = document.getElementById("speechStartBtn");
+    const stopBtn = document.getElementById("speechStopBtn");
+    if (startBtn) startBtn.disabled = listening;
+    if (stopBtn) stopBtn.disabled = !listening;
+  }
+
+  function initSpeechRecognition() {
+    if (speechRecognition) return speechRecognition;
+
+    const RecognitionCtor = getSpeechRecognitionCtor();
+    if (!RecognitionCtor) {
+      setSpeechStatus("Speech recognition is not supported in this browser. Try Chrome or Edge.");
+      return null;
+    }
+
+    const rec = new RecognitionCtor();
+    rec.lang = "en-US";
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    rec.onstart = () => {
+      speechActive = true;
+      setSpeechButtonState(true);
+      setSpeechStatus("Listening...");
+    };
+
+    rec.onresult = (event) => {
+      let finalTranscript = "";
+      let interimTranscript = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const transcript = result[0].transcript.trim();
+        if (result.isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+
+      const dialogInput = document.getElementById("dialogInput");
+      if (finalTranscript) {
+        speechHasTranscript = true;
+        dialogInput.value = finalTranscript;
+        setSpeechStatus("Heard: " + finalTranscript);
+        if (document.getElementById("speechAutoSend").checked) {
+          sendDialog();
+        }
+      } else if (interimTranscript) {
+        dialogInput.value = interimTranscript;
+        setSpeechStatus("Hearing: " + interimTranscript);
+      }
+    };
+
+    rec.onerror = (event) => {
+      const detail = event.error ? " (" + event.error + ")" : "";
+      if (event.error === "no-speech" && speechShouldListen) {
+        setSpeechStatus("Listening...");
+        return;
+      }
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        speechShouldListen = false;
+      }
+      speechActive = false;
+      setSpeechStatus("Speech recognition error" + detail + ".");
+      setSpeechButtonState(speechShouldListen);
+    };
+
+    rec.onend = () => {
+      speechActive = false;
+      if (!speechShouldListen) {
+        setSpeechButtonState(false);
+        setSpeechStatus(speechHasTranscript ? "Listener stopped." : "Listening stopped.");
+        return;
+      }
+
+      setSpeechButtonState(true);
+      setSpeechStatus("Listening...");
+      if (speechRestartTimer) {
+        clearTimeout(speechRestartTimer);
+      }
+      speechRestartTimer = setTimeout(() => {
+        if (!speechShouldListen || speechActive) return;
+        try {
+          rec.start();
+        } catch (e) {
+          setSpeechStatus("Could not restart speech recognition: " + e);
+          speechShouldListen = false;
+          setSpeechButtonState(false);
+        }
+      }, 250);
+    };
+
+    speechRecognition = rec;
+    return speechRecognition;
+  }
+
+  function startSpeechRecognition() {
+    const rec = initSpeechRecognition();
+    if (!rec) return;
+    speechShouldListen = true;
+    setSpeechButtonState(true);
+    if (speechActive) return;
+    try {
+      speechHasTranscript = false;
+      document.getElementById("dialogInput").value = "";
+      setSpeechStatus("Starting microphone...");
+      rec.start();
+    } catch (e) {
+      setSpeechStatus("Could not start speech recognition: " + e);
+      speechShouldListen = false;
+      setSpeechButtonState(false);
+    }
+  }
+
+  function stopSpeechRecognition() {
+    speechShouldListen = false;
+    if (speechRestartTimer) {
+      clearTimeout(speechRestartTimer);
+      speechRestartTimer = null;
+    }
+    setSpeechButtonState(false);
+    setSpeechStatus("Listening stopped.");
+    if (!speechRecognition) return;
+    try {
+      if (typeof speechRecognition.abort === "function") {
+        speechRecognition.abort();
+      } else {
+        speechRecognition.stop();
+      }
+    } catch (e) {
+      setSpeechStatus("Could not stop speech recognition: " + e);
+      setSpeechButtonState(false);
+    }
+  }
+
   async function startWallFollow() {
     const setSpeed = parseInt(document.getElementById("wfSetSpeed").value, 10);
     const delta = parseInt(document.getElementById("wfDelta").value, 10);
     const body = {
+      profile: document.getElementById("wfProfile").value,
       side: document.getElementById("wfSide").value,
       target_mm: parseInt(document.getElementById("wfTarget").value, 10),
       tolerance_mm: parseInt(document.getElementById("wfTol").value, 10),
@@ -606,8 +814,11 @@
     const out =
       "Active: " + s.active + "\n" +
       "State: " + (s.last_state || "UNKNOWN") + "\n" +
+      "T intersection: " + Boolean(s.last_intersection_detected) + "\n" +
       "Side dist mm: " + (s.last_side_mm == null ? "n/a" : s.last_side_mm) + "\n" +
       "Front dist mm: " + (s.last_front_mm == null ? "n/a" : s.last_front_mm) + "\n" +
+      "Left/right mm: " + (s.last_left_mm == null ? "n/a" : s.last_left_mm) +
+      " / " + (s.last_right_mm == null ? "n/a" : s.last_right_mm) + "\n" +
       "Last cmd: " + JSON.stringify(s.last_cmd || {}) + "\n" +
       "Config: side=" + (cfg.side || "n/a") +
       " target=" + (cfg.target_mm || "n/a") +
@@ -625,6 +836,20 @@
     document.getElementById("wfDeltaVal").textContent = String(delta);
     document.getElementById("wfBandVal").textContent =
       "(range " + (setSpeed - delta) + ".." + (setSpeed + delta) + ")";
+  }
+
+  function applyWallFollowPreset() {
+    const profile = document.getElementById("wfProfile").value;
+    const preset = WALL_FOLLOW_PRESETS[profile];
+    if (!preset) {
+      syncWallSpeedInputs();
+      return;
+    }
+    document.getElementById("wfTarget").value = preset.target_mm;
+    document.getElementById("wfTol").value = preset.tolerance_mm;
+    document.getElementById("wfSetSpeed").value = preset.set_speed;
+    document.getElementById("wfDelta").value = preset.correction_band;
+    syncWallSpeedInputs();
   }
 
   async function refreshWallFollowStatus() {
@@ -695,6 +920,125 @@
     }
   }
 
+  let lastDialogEventAt = 0;
+
+  function renderDialogEvent(d) {
+    if (!d || !d.updated_at || d.updated_at <= lastDialogEventAt) return;
+    lastDialogEventAt = d.updated_at;
+
+    const input = d.input || "";
+    const dialogInput = document.getElementById("dialogInput");
+    if (dialogInput && document.activeElement !== dialogInput) {
+      dialogInput.value = input;
+    }
+
+    if (d.source === "vosk") {
+      setSpeechStatus("Vosk heard: " + (input || "(empty)"));
+    }
+
+    const out =
+      "Input: " + input + "\n" +
+      "Source: " + (d.source || "unknown") + "\n" +
+      "Matched: " + d.matched + "\n" +
+      "Destination: " + (d.destination || "(none)") + "\n" +
+      "Final demo triggered: " + Boolean(d.final_triggered) + "\n" +
+      "Reply: " + (d.reply || "(none)") + "\n" +
+      "Actions: " + ((d.actions || []).join(", ") || "(none)") + "\n" +
+      "State: " + d.state + " | Scope depth: " + d.scope_depth;
+    document.getElementById("dialogOutput").textContent = out;
+  }
+
+  async function refreshDialogLast() {
+    try {
+      const res = await fetch("/api/dialog_last");
+      const data = await res.json();
+      if (data.ok) renderDialogEvent(data.dialog);
+    } catch (e) {
+      // Keep this quiet so a temporary network hiccup does not spam the UI.
+    }
+  }
+
+  function renderFinalStatus(data) {
+    const f = data.final || {};
+    const lidar = data.lidar || {};
+    const wf = data.wall_follow || {};
+    const front = f.front_mm != null ? Math.round(f.front_mm) : "n/a";
+    const baseline = f.baseline_front_mm != null ? Math.round(f.baseline_front_mm) : "n/a";
+    const left = f.left_mm != null ? Math.round(f.left_mm) : "n/a";
+    const right = f.right_mm != null ? Math.round(f.right_mm) : "n/a";
+    const lidarFront = lidar.front_min_mm != null ? Math.round(lidar.front_min_mm) : "n/a";
+    const out =
+      "Active: " + Boolean(f.active) + "\n" +
+      "State: " + (f.state || "UNKNOWN") + "\n" +
+      "Message: " + (f.message || "") + "\n" +
+      "Destination: " + (f.destination || "(none)") + "\n" +
+      "Approach front mm: " + front + " | baseline: " + baseline + "\n" +
+      "Side walls mm: left=" + left + " right=" + right + "\n" +
+      "Wall-follow state: " + (f.wall_state || "(none)") + "\n" +
+      "Current LIDAR front mm: " + lidarFront + "\n" +
+      "Wall follower active: " + Boolean(wf.active) +
+      (wf.last_state ? " | " + wf.last_state : "");
+    document.getElementById("finalDemoOutput").textContent = out;
+  }
+
+  async function startFinalDemo() {
+    try {
+      setStatus("sending /api/final/start ...");
+      const res = await fetch("/api/final/start", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: " + (data.error || "final demo start failed"));
+        return;
+      }
+      setStatus("ok: /api/final/start");
+      renderFinalStatus({final: data.final});
+      setSpeechStatus("Final demo armed. Local Vosk should be running on the laptop.");
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
+  async function stopFinalDemo() {
+    try {
+      setStatus("sending /api/final/stop ...");
+      const res = await fetch("/api/final/stop", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: " + (data.error || "final demo stop failed"));
+        return;
+      }
+      setStatus("ok: /api/final/stop");
+      renderFinalStatus({final: data.final});
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
+  async function refreshFinalStatus() {
+    try {
+      const res = await fetch("/api/final/status");
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: final demo status failed");
+        return;
+      }
+      renderFinalStatus(data);
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
+  setInterval(refreshDialogLast, 1000);
+  setInterval(refreshFinalStatus, 1000);
+
   // Press Enter in the text box to speak
   document.addEventListener("keydown", (e) => {
     const a = document.activeElement;
@@ -719,6 +1063,10 @@
 
   let joyActive = false;
   let joyInterval = null;
+  let lastJoyLeftCmd = null;
+  let lastJoyRightCmd = null;
+  const JOY_SEND_PERIOD_MS = 100;
+  const JOY_COMMAND_EPSILON = 40;
 
   // normalized joystick coords in [-1, 1]
   let joyX = 0;
@@ -760,11 +1108,13 @@
   function centerJoystick() {
     setKnobNormalized(0, 0);
     post("/api/drive", {left: 0, right: 0});
+    lastJoyLeftCmd = 0;
+    lastJoyRightCmd = 0;
     joyLEl.textContent = "0";
     joyREl.textContent = "0";
   }
 
-  function computeAndSendDrive() {
+  function computeAndSendDrive(forceSend = false) {
     const max = parseInt(document.getElementById("joyMax").value, 10);
     const dz = parseFloat(document.getElementById("joyDeadzone").value);
 
@@ -784,6 +1134,18 @@
     joyLEl.textContent = String(leftCmd);
     joyREl.textContent = String(rightCmd);
 
+    const changedEnough =
+      lastJoyLeftCmd == null ||
+      lastJoyRightCmd == null ||
+      Math.abs(leftCmd - lastJoyLeftCmd) >= JOY_COMMAND_EPSILON ||
+      Math.abs(rightCmd - lastJoyRightCmd) >= JOY_COMMAND_EPSILON;
+
+    if (!forceSend && !changedEnough) {
+      return;
+    }
+
+    lastJoyLeftCmd = leftCmd;
+    lastJoyRightCmd = rightCmd;
     post("/api/drive", {left: leftCmd, right: rightCmd});
   }
 
@@ -809,7 +1171,7 @@
 
   function startJoystickLoop() {
     if (joyInterval) return;
-    joyInterval = setInterval(computeAndSendDrive, 50); // 20 Hz
+    joyInterval = setInterval(computeAndSendDrive, JOY_SEND_PERIOD_MS);
   }
 
   function stopJoystickLoop() {
@@ -824,9 +1186,11 @@
 
     const p = pointerToNormalized(evt);
     setKnobNormalized(p.x, p.y);
+    lastJoyLeftCmd = null;
+    lastJoyRightCmd = null;
 
     startJoystickLoop();
-    computeAndSendDrive(); // send immediately
+    computeAndSendDrive(true); // send immediately
   });
 
   joyPad.addEventListener("pointermove", (evt) => {

@@ -24,6 +24,8 @@
 ~arm_words: [arm wave "raise your arm" "raise arm" "wave at me"]
 ~whoami: ["what is my name" "do you remember my name" "who am i"]
 ~howold: ["how old am i" "what is my age"]
+~bathroom_request: [bathroom restroom washroom "i am looking for the bathroom" "i need to go to the bathroom" "take me to the bathroom"]
+~lab_request: [lab "robot lab" "robotics lab" "i am looking for the robot lab" "i need to go to the robot lab" "take me to the robot lab"]
 
 # -----------------------------
 # Global safety / control words
@@ -31,6 +33,13 @@
 # to your safety interrupt behavior in your engine.
 # -----------------------------
 u:([stop cancel reset quit]): OK. Stopping now.
+
+# -----------------------------
+# Final project destination commands
+# Browser speech recognition can send these through /api/dialog_input.
+# -----------------------------
+u:(~bathroom_request): Follow me. I will take you to the bathroom. <head_yes>
+u:(~lab_request): Follow me. I will take you to the robot lab. <head_yes>
 
 # -----------------------------
 # Greeting with output choice list + action tag

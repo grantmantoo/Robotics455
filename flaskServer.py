@@ -2,7 +2,12 @@ from flask import Flask, request, jsonify, render_template
 from robot_control import RobotControl
 from dialog_engine import DialogEngine
 from action_runner import ActionRunner
-from wall_follower import WallFollower
+from wall_follower import (
+    WALL_FOLLOW_CONFIG_FIELDS,
+    WALL_FOLLOW_PROFILES,
+    WallFollower,
+    get_wall_follow_profile,
+)
 try:
     from lidar_safety import LidarSafetyMonitor
     LIDAR_IMPORT_ERROR = None
@@ -24,7 +29,11 @@ from typing import Optional
 class QuietHandler(WSGIRequestHandler):
     def log_request(self, code='-', size='-'):
         # Suppress heartbeat spam
-        if self.path.startswith("/api/heartbeat"):
+        if (
+            self.path.startswith("/api/heartbeat")
+            or self.path.startswith("/api/final/status")
+            or self.path.startswith("/api/dialog_last")
+        ):
             return
         super().log_request(code, size)
 
@@ -42,10 +51,58 @@ wall_follower = None
 LIDAR_CLEAR_SCANS_REQUIRED = 3
 LIDAR_MOTION_GUARD_PERIOD_S = 0.1
 
+FINAL_APPROACH_MIN_DROP_MM = 250
+FINAL_APPROACH_MAX_MM = 1800
+FINAL_APPROACH_IMMEDIATE_MM = 650
+FINAL_APPROACH_MIN_WAIT_S = 0.75
+FINAL_APPROACH_TIMEOUT_S = 60.0
+FINAL_TURN_SPEED = 1000
+FINAL_TURN_180_S = 1.60
+FINAL_TURN_90_S = 0.80
+FINAL_FORWARD_SPEED = 900
+FINAL_SIDE_WALL_DETECT_MM = 1500
+FINAL_ALIGN_MIN_DRIVE_S = 1.2
+FINAL_ALIGN_CONFIRM_SCANS = 5
+FINAL_ALIGN_TIMEOUT_S = 12.0
+FINAL_T_INTERSECTION_TIMEOUT_S = 45.0
+FINAL_FINISH_DRIVE_S = 5.0
+FINAL_OBSTACLE_STOP_MM = 900
+FINAL_OBSTACLE_CLEAR_MM = 1150
+FINAL_ACK_PAUSE_S = 2.8
+
 _motion_lock = threading.Lock()
 _motion_left = 0
 _motion_right = 0
 _motion_active = False
+
+_dialog_event_lock = threading.Lock()
+_last_dialog_event = {
+    "input": "",
+    "matched": False,
+    "reply": "",
+    "actions": [],
+    "state": "BOOT",
+    "scope_depth": 0,
+    "source": "none",
+    "updated_at": 0.0,
+}
+
+_final_demo_lock = threading.Lock()
+_final_demo_cancel = threading.Event()
+_final_demo_thread = None
+_final_demo_status = {
+    "active": False,
+    "state": "IDLE",
+    "message": "Final demo idle.",
+    "destination": None,
+    "front_mm": None,
+    "baseline_front_mm": None,
+    "left_mm": None,
+    "right_mm": None,
+    "wall_state": None,
+    "started_at": None,
+    "updated_at": time.time(),
+}
 
 
 def set_dialog_state(value: Optional[str]):
@@ -123,12 +180,445 @@ def _stop_wall_follower_if_active(reason: str):
         wall_follower.stop()
 
 
+def _store_dialog_event(event: dict) -> None:
+    global _last_dialog_event
+    with _dialog_event_lock:
+        merged = dict(_last_dialog_event)
+        merged.update(event)
+        merged["updated_at"] = time.time()
+        _last_dialog_event = merged
+
+
+def _get_dialog_event() -> dict:
+    with _dialog_event_lock:
+        return dict(_last_dialog_event)
+
+
+def _set_final_demo_state(state: str, message: str, **extra) -> None:
+    with _final_demo_lock:
+        prev_state = _final_demo_status.get("state")
+        prev_message = _final_demo_status.get("message")
+        prev_log_at = float(_final_demo_status.get("_log_at") or 0.0)
+        now = time.time()
+        _final_demo_status.update(
+            {
+                "state": state,
+                "message": message,
+                "updated_at": now,
+            }
+        )
+        _final_demo_status.update(extra)
+        should_log = state != prev_state or message != prev_message or (now - prev_log_at) >= 3.0
+        if should_log:
+            _final_demo_status["_log_at"] = now
+            print(f"[FINAL] {state}: {message}")
+
+
+def _get_final_demo_status() -> dict:
+    with _final_demo_lock:
+        status = dict(_final_demo_status)
+    status.pop("_log_at", None)
+    return status
+
+
+def _front_distance_from_lidar_status(status: dict | None) -> Optional[float]:
+    if not status:
+        return None
+    candidates = []
+    for key in ("front_min_mm",):
+        value = status.get(key)
+        if value is not None:
+            candidates.append(float(value))
+    zone_mins = status.get("zone_mins_mm") or {}
+    for key in ("front_center", "front"):
+        value = zone_mins.get(key)
+        if value is not None:
+            candidates.append(float(value))
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def _destination_from_text(text: str, explicit_destination: object = None) -> Optional[str]:
+    hay = f"{explicit_destination or ''} {text or ''}".lower()
+    if any(word in hay for word in ("bathroom", "restroom", "washroom")):
+        return "bathroom"
+    if "robotics lab" in hay or "robot lab" in hay or re.search(r"\blab\b", hay):
+        return "robot lab"
+    return None
+
+
+def _final_demo_is_waiting_for_destination() -> bool:
+    with _final_demo_lock:
+        return bool(_final_demo_status["active"] and _final_demo_status["state"] == "WAIT_DESTINATION")
+
+
+def _final_demo_is_active() -> bool:
+    with _final_demo_lock:
+        return bool(_final_demo_status["active"])
+
+
+def _reset_final_demo_status(message: str = "Final demo idle.") -> None:
+    with _final_demo_lock:
+        _final_demo_status.update(
+            {
+                "active": False,
+                "state": "IDLE",
+                "message": message,
+                "destination": None,
+                "front_mm": None,
+                "baseline_front_mm": None,
+                "left_mm": None,
+                "right_mm": None,
+                "wall_state": None,
+                "started_at": None,
+                "updated_at": time.time(),
+            }
+        )
+
+
+def _cancel_final_demo(reason: str) -> None:
+    _final_demo_cancel.set()
+    _set_final_demo_state("CANCELLED", reason)
+    try:
+        _stop_wall_follower_if_active("final demo cancel")
+        ctrl.stop()
+        _clear_motion_command()
+    except Exception as ex:
+        print(f"[FINAL] cancel stop failed: {ex}")
+    _reset_final_demo_status(reason)
+
+
+def _sleep_with_final_cancel(seconds: float) -> bool:
+    end = time.time() + seconds
+    while time.time() < end:
+        if _final_demo_cancel.is_set():
+            return False
+        # The final demo intentionally runs autonomously for several seconds
+        # between browser requests, so keep the server watchdog from treating
+        # planned speech/turn/drive time as a lost-client emergency.
+        touch_heartbeat()
+        time.sleep(0.03)
+    return True
+
+
+def _final_turn_left(seconds: float, label: str) -> bool:
+    _set_final_demo_state(label, f"Turning left for {seconds:.2f}s.")
+    try:
+        ctrl.turn_left(FINAL_TURN_SPEED)
+        _set_motion_command(-FINAL_TURN_SPEED, FINAL_TURN_SPEED)
+        return _sleep_with_final_cancel(seconds)
+    finally:
+        ctrl.stop()
+        _clear_motion_command()
+
+
+def _final_turn_right(seconds: float, label: str) -> bool:
+    _set_final_demo_state(label, f"Turning right for {seconds:.2f}s.")
+    try:
+        ctrl.turn_right(FINAL_TURN_SPEED)
+        _set_motion_command(FINAL_TURN_SPEED, -FINAL_TURN_SPEED)
+        return _sleep_with_final_cancel(seconds)
+    finally:
+        ctrl.stop()
+        _clear_motion_command()
+
+
+def _final_front_obstacle(status: dict | None) -> bool:
+    front_mm = _front_distance_from_lidar_status(status)
+    return bool(status and status.get("front_blocked")) or (
+        front_mm is not None and front_mm <= FINAL_OBSTACLE_STOP_MM
+    )
+
+
+def _final_front_clear(status: dict | None) -> bool:
+    front_mm = _front_distance_from_lidar_status(status)
+    return front_mm is None or front_mm >= FINAL_OBSTACLE_CLEAR_MM
+
+
+def _final_wait_front_clear() -> bool:
+    _set_final_demo_state("OBSTACLE_WAIT", "Obstacle detected in front. Waiting until clear.")
+    while not _final_demo_cancel.is_set():
+        status = lidar_monitor.status() if lidar_monitor is not None else {}
+        front_mm = _front_distance_from_lidar_status(status)
+        _set_final_demo_state(
+            "OBSTACLE_WAIT",
+            "Obstacle detected in front. Waiting until clear.",
+            front_mm=front_mm,
+        )
+        if _final_front_clear(status):
+            return True
+        ctrl.stop()
+        _clear_motion_command()
+        time.sleep(0.15)
+    return False
+
+
+def _final_drive_forward_until_side_walls() -> bool:
+    start = time.time()
+    aligned_scans = 0
+    _set_final_demo_state(
+        "ALIGN_HALLWAY",
+        f"Driving forward until both side walls are within {FINAL_SIDE_WALL_DETECT_MM} mm.",
+    )
+    try:
+        while not _final_demo_cancel.is_set():
+            if time.time() - start > FINAL_ALIGN_TIMEOUT_S:
+                _set_final_demo_state("ALIGN_TIMEOUT", "Timed out before seeing both side walls.")
+                return False
+
+            status = lidar_monitor.status() if lidar_monitor is not None else {}
+            if _final_front_obstacle(status):
+                ctrl.stop()
+                _clear_motion_command()
+                if not _final_wait_front_clear():
+                    return False
+                aligned_scans = 0
+
+            zone_mins = status.get("zone_mins_mm") or {}
+            left_mm = zone_mins.get("left")
+            right_mm = zone_mins.get("right")
+            front_mm = _front_distance_from_lidar_status(status)
+            elapsed = time.time() - start
+            sides_detected = (
+                left_mm is not None
+                and right_mm is not None
+                and float(left_mm) <= FINAL_SIDE_WALL_DETECT_MM
+                and float(right_mm) <= FINAL_SIDE_WALL_DETECT_MM
+            )
+            if elapsed >= FINAL_ALIGN_MIN_DRIVE_S and sides_detected:
+                aligned_scans += 1
+            else:
+                aligned_scans = 0
+            _set_final_demo_state(
+                "ALIGN_HALLWAY",
+                "Driving forward until both side walls are detected.",
+                front_mm=front_mm,
+                left_mm=left_mm,
+                right_mm=right_mm,
+            )
+            if aligned_scans >= FINAL_ALIGN_CONFIRM_SCANS:
+                ctrl.stop_smooth()
+                _clear_motion_command()
+                _set_final_demo_state("HALLWAY_ALIGNED", "Both side walls detected.")
+                return True
+
+            ctrl.drive_autonomous(FINAL_FORWARD_SPEED, FINAL_FORWARD_SPEED)
+            _set_motion_command(FINAL_FORWARD_SPEED, FINAL_FORWARD_SPEED)
+            if not _sleep_with_final_cancel(0.15):
+                return False
+        return False
+    finally:
+        ctrl.stop()
+        _clear_motion_command()
+
+
+def _final_wall_follow_until_t_intersection() -> bool:
+    start = time.time()
+    _start_final_right_wall_follow()
+    while not _final_demo_cancel.is_set():
+        if time.time() - start > FINAL_T_INTERSECTION_TIMEOUT_S:
+            _set_final_demo_state("T_TIMEOUT", "Timed out before detecting the T-intersection.")
+            return False
+
+        status = wall_follower.status() if wall_follower is not None else {}
+        _set_final_demo_state(
+            "WALL_FOLLOW_TO_T",
+            "Wall following until T-intersection is detected.",
+            wall_state=status.get("last_state"),
+        )
+        if status.get("last_intersection_detected") or status.get("last_state") == "T_INTERSECTION_DETECTED":
+            _stop_wall_follower_if_active("final demo T-intersection detected")
+            ctrl.stop()
+            _clear_motion_command()
+            _set_final_demo_state("T_INTERSECTION", "T-intersection detected.")
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _final_decision_turn(destination: str) -> bool:
+    if destination == "bathroom":
+        return _final_turn_right(FINAL_TURN_90_S, "TURN_RIGHT_TO_BATHROOM")
+    return _final_turn_left(FINAL_TURN_90_S, "TURN_LEFT_TO_ROBOT_LAB")
+
+
+def _final_drive_forward_for_finish() -> bool:
+    elapsed_drive = 0.0
+    last = time.time()
+    _set_final_demo_state("FINAL_STRAIGHT", f"Driving straight for {FINAL_FINISH_DRIVE_S:.1f}s.")
+    try:
+        while not _final_demo_cancel.is_set() and elapsed_drive < FINAL_FINISH_DRIVE_S:
+            now = time.time()
+            dt = now - last
+            last = now
+
+            status = lidar_monitor.status() if lidar_monitor is not None else {}
+            front_mm = _front_distance_from_lidar_status(status)
+            if _final_front_obstacle(status):
+                ctrl.stop()
+                _clear_motion_command()
+                if not _final_wait_front_clear():
+                    return False
+                last = time.time()
+                continue
+
+            elapsed_drive += dt
+            _set_final_demo_state(
+                "FINAL_STRAIGHT",
+                f"Driving straight for {FINAL_FINISH_DRIVE_S:.1f}s.",
+                front_mm=front_mm,
+            )
+            ctrl.drive_autonomous(FINAL_FORWARD_SPEED, FINAL_FORWARD_SPEED)
+            _set_motion_command(FINAL_FORWARD_SPEED, FINAL_FORWARD_SPEED)
+            if not _sleep_with_final_cancel(0.1):
+                return False
+        ctrl.stop_smooth()
+        _clear_motion_command()
+        return True
+    finally:
+        ctrl.stop()
+        _clear_motion_command()
+
+
+def _start_final_right_wall_follow() -> None:
+    global wall_follower
+    if lidar_monitor is None:
+        raise RuntimeError("lidar monitor not configured")
+    if wall_follower is None:
+        wall_follower = WallFollower(ctrl, lidar_monitor)
+    cfg = get_wall_follow_profile("final", side="right")
+    start_kwargs = {}
+    for key in WALL_FOLLOW_CONFIG_FIELDS:
+        if key not in cfg:
+            continue
+        start_kwargs[key] = cfg[key]
+    wall_follower.start(**start_kwargs)
+    _set_final_demo_state(
+        "WALL_FOLLOW_RIGHT",
+        "Right wall following started.",
+        active=True,
+    )
+
+
+def _final_destination_ack(destination: str) -> str:
+    if destination == "robot lab":
+        return "Sure, I will take you to the robot lab. Follow me."
+    if destination == "bathroom":
+        return "Sure, I will take you to the bathroom. Follow me."
+    return f"Sure, I will take you to the {destination}. Follow me."
+
+
+def _final_demo_wait_for_approach() -> bool:
+    start = time.time()
+    baseline_front = None
+    _set_final_demo_state(
+        "WAIT_APPROACH",
+        "Waiting for a person to approach the front LIDAR.",
+        active=True,
+        started_at=start,
+    )
+
+    while not _final_demo_cancel.is_set():
+        if time.time() - start > FINAL_APPROACH_TIMEOUT_S:
+            _set_final_demo_state("TIMEOUT", "No approaching person detected.")
+            return False
+        if lidar_monitor is None:
+            _set_final_demo_state("ERROR", "LIDAR monitor is not configured.")
+            return False
+
+        status = lidar_monitor.status()
+        front_mm = _front_distance_from_lidar_status(status)
+        if front_mm is not None:
+            if baseline_front is None or front_mm > baseline_front:
+                baseline_front = front_mm
+
+            elapsed = time.time() - start
+            drop = baseline_front - front_mm if baseline_front is not None else 0
+            close_approach = (
+                elapsed >= FINAL_APPROACH_MIN_WAIT_S
+                and front_mm <= FINAL_APPROACH_MAX_MM
+                and drop >= FINAL_APPROACH_MIN_DROP_MM
+            )
+            very_close_after_wait = (
+                elapsed >= FINAL_APPROACH_MIN_WAIT_S
+                and front_mm <= FINAL_APPROACH_IMMEDIATE_MM
+            )
+            _set_final_demo_state(
+                "WAIT_APPROACH",
+                "Waiting for front LIDAR distance to get smaller.",
+                front_mm=front_mm,
+                baseline_front_mm=baseline_front,
+            )
+            if close_approach or very_close_after_wait:
+                return True
+
+        time.sleep(0.2)
+    return False
+
+
+def _final_demo_greet_worker() -> None:
+    try:
+        if not _final_demo_wait_for_approach():
+            _reset_final_demo_status(_get_final_demo_status().get("message", "Demo stopped."))
+            return
+        if _final_demo_cancel.is_set():
+            return
+        _set_final_demo_state(
+            "GREET",
+            "Person detected. Greeting and waiting for Vosk destination command.",
+        )
+        speak_async("Greetings. Where would you like to go?")
+        _set_final_demo_state(
+            "WAIT_DESTINATION",
+            "Listening through local Vosk. Say bathroom or robot lab.",
+            active=True,
+        )
+    except Exception as ex:
+        _set_final_demo_state("ERROR", f"Final demo greeting failed: {ex}")
+        _reset_final_demo_status(f"Final demo greeting failed: {ex}")
+
+
+def _final_demo_navigation_worker(destination: str) -> None:
+    try:
+        _set_final_demo_state(
+            "NAV_START",
+            f"Starting route toward {destination}.",
+            active=True,
+            destination=destination,
+        )
+        speak_async(_final_destination_ack(destination))
+        if not _sleep_with_final_cancel(FINAL_ACK_PAUSE_S):
+            return
+        if not _final_turn_left(FINAL_TURN_180_S, "TURN_180"):
+            return
+        if not _final_drive_forward_until_side_walls():
+            return
+        if not _final_wall_follow_until_t_intersection():
+            return
+        if not _final_decision_turn(destination):
+            return
+        if not _final_drive_forward_for_finish():
+            return
+        if _final_demo_cancel.is_set():
+            return
+        _set_final_demo_state("ARRIVED", f"Arrived at {destination}.", active=False)
+        speak_async(f"We have arrived at the {destination}.")
+    except Exception as ex:
+        _set_final_demo_state("ERROR", f"Final demo navigation failed: {ex}")
+        try:
+            ctrl.stop()
+            _clear_motion_command()
+        except Exception:
+            pass
+
+
 # =========================
 # Watchdog / Force Stop
 # =========================
 
-HEARTBEAT_TIMEOUT_S = 1.0   # if we haven't heard from browser in this many seconds -> force stop
-WATCHDOG_PERIOD_S = 0.1     # how often watchdog checks
+HEARTBEAT_TIMEOUT_S = 3.0   # allow browser mic prompts / Pi load without nuisance stops
+WATCHDOG_PERIOD_S = 0.25    # how often watchdog checks
 
 _last_heartbeat = time.time()
 _has_seen_heartbeat = False
@@ -155,6 +645,9 @@ def run_force_stop_async(reason: str):
         global _force_stop_running
         try:
             print(f"[WATCHDOG] FORCE STOP triggered: {reason}")
+            if _final_demo_is_active():
+                _final_demo_cancel.set()
+                _reset_final_demo_status(f"Final demo stopped: {reason}")
             _stop_wall_follower_if_active("watchdog force stop")
             if action_runner is not None:
                 action_runner.interrupt()
@@ -170,6 +663,7 @@ def run_force_stop_async(reason: str):
                 _force_stop_running = False
 
     threading.Thread(target=worker, daemon=True).start()
+
 
 def watchdog_loop():
     """
@@ -277,6 +771,8 @@ def api_heartbeat():
 # Optional: manual “panic button” endpoint (handy for testing)
 @app.route("/api/force_stop", methods=["POST"])
 def api_force_stop():
+    if _final_demo_is_active():
+        _cancel_final_demo("manual force stop")
     if action_runner is not None:
         action_runner.interrupt()
     if dialog_engine is not None:
@@ -292,6 +788,8 @@ def api_force_stop():
 @app.route("/api/drive", methods=["POST"])
 def api_drive():
     touch_heartbeat()  # treat commands as “activity” too
+    if _final_demo_is_active():
+        _cancel_final_demo("manual /api/drive")
     _stop_wall_follower_if_active("manual /api/drive")
 
     data = request.get_json(silent=True) or {}
@@ -335,6 +833,8 @@ def api_drive():
 @app.route("/api/forward", methods=["POST"])
 def api_forward():
     touch_heartbeat()
+    if _final_demo_is_active():
+        _cancel_final_demo("manual /api/forward")
     _stop_wall_follower_if_active("manual /api/forward")
     data = request.get_json(silent=True) or {}
     try:
@@ -360,6 +860,8 @@ def api_forward():
 @app.route("/api/backward", methods=["POST"])
 def api_backward():
     touch_heartbeat()
+    if _final_demo_is_active():
+        _cancel_final_demo("manual /api/backward")
     _stop_wall_follower_if_active("manual /api/backward")
     data = request.get_json(silent=True) or {}
     try:
@@ -385,6 +887,8 @@ def api_backward():
 @app.route("/api/turn_left", methods=["POST"])
 def api_turn_left():
     touch_heartbeat()
+    if _final_demo_is_active():
+        _cancel_final_demo("manual /api/turn_left")
     _stop_wall_follower_if_active("manual /api/turn_left")
     data = request.get_json(silent=True) or {}
     try:
@@ -403,6 +907,8 @@ def api_turn_left():
 @app.route("/api/turn_right", methods=["POST"])
 def api_turn_right():
     touch_heartbeat()
+    if _final_demo_is_active():
+        _cancel_final_demo("manual /api/turn_right")
     _stop_wall_follower_if_active("manual /api/turn_right")
     data = request.get_json(silent=True) or {}
     try:
@@ -421,6 +927,8 @@ def api_turn_right():
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     touch_heartbeat()
+    if _final_demo_is_active():
+        _cancel_final_demo("manual /api/stop")
     _stop_wall_follower_if_active("manual /api/stop")
     try:
         if action_runner is not None:
@@ -713,6 +1221,11 @@ def api_dialog_state():
     )
 
 
+@app.route("/api/dialog_last", methods=["GET"])
+def api_dialog_last():
+    return jsonify({"ok": True, "dialog": _get_dialog_event()})
+
+
 @app.route("/api/lidar_status", methods=["GET"])
 def api_lidar_status():
     if lidar_monitor is None:
@@ -726,10 +1239,72 @@ def api_lidar_status():
     return jsonify({"ok": True, "lidar": lidar_monitor.status()})
 
 
+@app.route("/api/final/start", methods=["POST"])
+def api_final_start():
+    touch_heartbeat()
+    global _final_demo_thread
+    if lidar_monitor is None:
+        return bad("lidar monitor not configured", code=500)
+
+    if _final_demo_is_active():
+        _cancel_final_demo("restarting final demo")
+
+    _final_demo_cancel.clear()
+    try:
+        _stop_wall_follower_if_active("final demo start")
+        if action_runner is not None:
+            action_runner.interrupt()
+        ctrl.stop()
+        _clear_motion_command()
+    except Exception as ex:
+        return bad(f"final demo start failed: {ex}", code=500)
+
+    _reset_final_demo_status("Final demo starting.")
+    with _final_demo_lock:
+        _final_demo_status.update(
+            {
+                "active": True,
+                "state": "STARTING",
+                "message": "Final demo starting.",
+                "started_at": time.time(),
+                "updated_at": time.time(),
+            }
+        )
+    _final_demo_thread = threading.Thread(target=_final_demo_greet_worker, daemon=True)
+    _final_demo_thread.start()
+    return jsonify({"ok": True, "final": _get_final_demo_status()})
+
+
+@app.route("/api/final/stop", methods=["POST"])
+def api_final_stop():
+    touch_heartbeat()
+    if _final_demo_is_active():
+        _cancel_final_demo("final demo stopped")
+    else:
+        _reset_final_demo_status("Final demo stopped.")
+    return jsonify({"ok": True, "final": _get_final_demo_status()})
+
+
+@app.route("/api/final/status", methods=["GET"])
+def api_final_status():
+    lidar_status = lidar_monitor.status() if lidar_monitor is not None else None
+    wall_status = wall_follower.status() if wall_follower is not None else {"active": False}
+    return jsonify(
+        {
+            "ok": True,
+            "final": _get_final_demo_status(),
+            "lidar": lidar_status,
+            "wall_follow": wall_status,
+        }
+    )
+
+
 @app.route("/api/wall_follow/start", methods=["POST"])
 def api_wall_follow_start():
-    touch_heartbeat()
     global wall_follower
+    touch_heartbeat()
+    if _final_demo_is_active():
+        _cancel_final_demo("manual wall follow start")
     if lidar_monitor is None:
         return bad("lidar monitor not configured", code=500)
     if wall_follower is None:
@@ -738,59 +1313,39 @@ def api_wall_follow_start():
     try:
         data = request.get_json(silent=True) or {}
         side = str(data.get("side", "right")).lower().strip()
-        target_mm = int(data.get("target_mm", 1000))
-        tolerance_mm = int(data.get("tolerance_mm", 150))
-        set_speed_raw = data.get("set_speed", data.get("base_speed", 1000))
-        base_speed = max(1000, int(set_speed_raw))
-        correction_band = int(data.get("correction_band", data.get("delta", 200)))
-        steer_delta = int(data.get("steer_delta", 260))
-        steer_min = int(data.get("steer_min", 80))
-        steer_max = int(data.get("steer_max", 200))
-        steer_kp = float(data.get("steer_kp", 0.25))
-        turn_gain = float(data.get("turn_gain", 1.35))
-        search_delta = int(data.get("search_delta", 120))
-        front_stop_mm = int(data.get("front_stop_mm", 320))
-        front_emergency_mm = int(data.get("front_emergency_mm", 300))
-        front_slow_mm = int(data.get("front_slow_mm", 800))
-        front_turn_start_mm = int(data.get("front_turn_start_mm", 950))
-        front_turn_full_mm = int(data.get("front_turn_full_mm", 420))
-        front_turn_max = int(data.get("front_turn_max", 1100))
-        front_turn_center_weight = float(data.get("front_turn_center_weight", 0.65))
-        front_turn_curve = float(data.get("front_turn_curve", 2.2))
-        front_diag_weight = float(data.get("front_diag_weight", 0.90))
-        lost_wall_mm = int(data.get("lost_wall_mm", 2400))
-        reverse_time_s = float(data.get("reverse_time_s", 0.35))
-        turn_time_s = float(data.get("turn_time_s", 0.45))
+        profile = str(data.get("profile", "final")).lower().strip()
+        cfg = get_wall_follow_profile(profile, side=side)
+
+        if "set_speed" in data and "base_speed" not in data:
+            data["base_speed"] = data["set_speed"]
+        if "delta" in data and "correction_band" not in data:
+            data["correction_band"] = data["delta"]
+
+        start_kwargs = {}
+        for key in WALL_FOLLOW_CONFIG_FIELDS:
+            if key not in cfg:
+                continue
+            raw = data.get(key, cfg[key])
+            default = cfg[key]
+            if key == "side":
+                start_kwargs[key] = str(raw).lower().strip()
+            elif isinstance(default, float):
+                start_kwargs[key] = float(raw)
+            else:
+                start_kwargs[key] = int(raw)
+
+        start_kwargs["base_speed"] = max(1000, int(start_kwargs["base_speed"]))
         _clear_motion_command()
-        wall_follower.start(
-            side=side,
-            target_mm=target_mm,
-            tolerance_mm=tolerance_mm,
-            base_speed=base_speed,
-            correction_band=correction_band,
-            steer_delta=steer_delta,
-            steer_min=steer_min,
-            steer_max=steer_max,
-            steer_kp=steer_kp,
-            turn_gain=turn_gain,
-            search_delta=search_delta,
-            front_stop_mm=front_stop_mm,
-            front_emergency_mm=front_emergency_mm,
-            front_slow_mm=front_slow_mm,
-            front_turn_start_mm=front_turn_start_mm,
-            front_turn_full_mm=front_turn_full_mm,
-            front_turn_max=front_turn_max,
-            front_turn_center_weight=front_turn_center_weight,
-            front_turn_curve=front_turn_curve,
-            front_diag_weight=front_diag_weight,
-            lost_wall_mm=lost_wall_mm,
-            reverse_time_s=reverse_time_s,
-            turn_time_s=turn_time_s,
-        )
+        wall_follower.start(**start_kwargs)
     except Exception as e:
         return bad(f"wall follow start failed: {e}", code=400)
 
     return jsonify({"ok": True, "wall_follow": wall_follower.status()})
+
+
+@app.route("/api/wall_follow/profiles", methods=["GET"])
+def api_wall_follow_profiles():
+    return jsonify({"ok": True, "profiles": WALL_FOLLOW_PROFILES})
 
 
 @app.route("/api/wall_follow/stop", methods=["POST"])
@@ -816,25 +1371,48 @@ def api_wall_follow_status():
 @app.route("/api/dialog_input", methods=["POST"])
 def api_dialog_input():
     touch_heartbeat()
-    _stop_wall_follower_if_active("dialog input")
     if dialog_engine is None:
         return bad("dialog engine not configured", code=500)
 
-    # Wheel deadman: any dialog input immediately stops wheel motion,
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+    source = data.get("source", "browser")
+    if not isinstance(text, str):
+        return bad("text must be a string")
+    text = sanitize_tts(text)
+    if not text:
+        return bad("text is empty")
+    destination = _destination_from_text(text, data.get("destination"))
+    final_destination_waiting = bool(destination and _final_demo_is_waiting_for_destination())
+
+    if _final_demo_is_active() and not final_destination_waiting:
+        response = {
+            "ok": True,
+            "input": text,
+            "matched": False,
+            "reply": "",
+            "actions": [],
+            "state": get_dialog_state(),
+            "scope_depth": dialog_engine.current_scope_depth(),
+            "source": source,
+            "destination": destination,
+            "final_triggered": False,
+            "ignored": True,
+            "ignore_reason": "final demo already navigating",
+        }
+        _store_dialog_event(response)
+        print(f"[FINAL] ignored speech while navigating: {text!r}")
+        return jsonify(response)
+
+    _stop_wall_follower_if_active("dialog input")
+
+    # Wheel deadman: any non-final dialog input immediately stops wheel motion,
     # even if wheels were started by manual drive controls.
     try:
         ctrl.stop()
         _clear_motion_command()
     except Exception as ex:
         print(f"[DIALOG] deadman stop failed: {ex}")
-
-    data = request.get_json(silent=True) or {}
-    text = data.get("text", "")
-    if not isinstance(text, str):
-        return bad("text must be a string")
-    text = sanitize_tts(text)
-    if not text:
-        return bad("text is empty")
 
     with dialog_lock:
         result = dialog_engine.handle_input(text)
@@ -852,7 +1430,7 @@ def api_dialog_input():
             print(f"[DIALOG] stop failed on interrupt: {ex}")
 
     speak_text = result.get("speak_text", "")
-    if isinstance(speak_text, str) and speak_text:
+    if isinstance(speak_text, str) and speak_text and not final_destination_waiting:
         speak_async(speak_text)
 
     actions = result.get("actions", [])
@@ -861,17 +1439,36 @@ def api_dialog_input():
         set_dialog_state("EXEC_ACTIONS")
         action_runner.enqueue(actions)
 
-    return jsonify(
-        {
-            "ok": True,
-            "input": text,
-            "matched": result.get("matched", False),
-            "reply": speak_text,
-            "actions": actions,
-            "state": get_dialog_state(),
-            "scope_depth": dialog_engine.current_scope_depth(),
-        }
-    )
+    final_triggered = False
+    if final_destination_waiting:
+        final_triggered = True
+        _set_final_demo_state(
+            "NAV_QUEUED",
+            f"Destination heard: {destination}. Starting navigation.",
+            destination=destination,
+            active=True,
+        )
+        _final_demo_cancel.clear()
+        threading.Thread(
+            target=_final_demo_navigation_worker,
+            args=(destination,),
+            daemon=True,
+        ).start()
+
+    response = {
+        "ok": True,
+        "input": text,
+        "matched": result.get("matched", False),
+        "reply": speak_text,
+        "actions": actions,
+        "state": get_dialog_state(),
+        "scope_depth": dialog_engine.current_scope_depth(),
+        "source": source,
+        "destination": destination,
+        "final_triggered": final_triggered,
+    }
+    _store_dialog_event(response)
+    return jsonify(response)
 
 
 if __name__ == "__main__":
