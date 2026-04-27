@@ -21,6 +21,7 @@ class LidarSafetyMonitor:
         stop_mm: int = 800,
         clear_scans_required: int = 3,
         block_scans_required: int = 1,
+        angle_offset_deg: int = 0,
         front_zones: Optional[List[Tuple[int, int]]] = None,
         rear_zones: Optional[List[Tuple[int, int]]] = None,
     ):
@@ -28,17 +29,18 @@ class LidarSafetyMonitor:
         self.stop_mm = int(stop_mm)
         self.clear_scans_required = max(1, int(clear_scans_required))
         self.block_scans_required = max(1, int(block_scans_required))
-        self.front_zones = front_zones or [(330, 359), (0, 30)]
+        self.angle_offset_deg = int(angle_offset_deg) % 360
+        self.front_zones = front_zones or [(357, 359), (0, 3)]
         # Narrow center-forward cone for wall-follow front obstacle checks.
-        self.front_center_zones = [(350, 359), (0, 10)]
+        self.front_center_zones = [(357, 359), (0, 3)]
         self.rear_zones = rear_zones or [(180, 210)]
         # Robot self-echo angles to ignore globally.
         self.ignore_zones = [(108, 122), (144, 150)]
         # Extra zones for wall-follow control.
-        self.right_zones = [(70, 110)]
+        self.right_zones = [(87, 93)]
         self.front_right_zones = [(20, 70)]
         self.back_right_zones = [(110, 150)]
-        self.left_zones = [(250, 290)]
+        self.left_zones = [(267, 273)]
         self.front_left_zones = [(290, 340)]
         self.back_left_zones = [(210, 250)]
         self.scan_buf_meas = 400
@@ -67,6 +69,7 @@ class LidarSafetyMonitor:
             "front_left": None,
             "back_left": None,
         }
+        self.zone_avgs_mm: Dict[str, Optional[float]] = dict(self.zone_mins_mm)
         self.last_scan_time = 0.0
         self.connected_port: Optional[str] = None
         self.last_error: Optional[str] = None
@@ -76,6 +79,7 @@ class LidarSafetyMonitor:
         front_min: Optional[float],
         rear_min: Optional[float],
         zone_mins: Dict[str, Optional[float]],
+        zone_avgs: Dict[str, Optional[float]],
     ) -> None:
         """
         Mid-scan update for lower latency blocking.
@@ -95,6 +99,7 @@ class LidarSafetyMonitor:
             self.front_min_mm = front_min
             self.rear_min_mm = rear_min
             self.zone_mins_mm = dict(zone_mins)
+            self.zone_avgs_mm = dict(zone_avgs)
             self.last_scan_time = time.time()
         if changed:
             print(
@@ -138,6 +143,7 @@ class LidarSafetyMonitor:
         front_min: Optional[float],
         rear_min: Optional[float],
         zone_mins: Dict[str, Optional[float]],
+        zone_avgs: Dict[str, Optional[float]],
     ) -> None:
         front_hit = front_min is not None and front_min < self.stop_mm
         rear_hit = rear_min is not None and rear_min < self.stop_mm
@@ -174,6 +180,7 @@ class LidarSafetyMonitor:
             self.front_min_mm = front_min
             self.rear_min_mm = rear_min
             self.zone_mins_mm = dict(zone_mins)
+            self.zone_avgs_mm = dict(zone_avgs)
             self.last_scan_time = time.time()
 
         if prev_f != self.front_blocked or prev_r != self.rear_blocked:
@@ -198,6 +205,21 @@ class LidarSafetyMonitor:
             try:
                 print(f"[LIDAR] connecting on {port}")
                 lidar = RPLidar(port, timeout=1)
+                # Some rplidar package builds return 3+ values from
+                # get_health(), while iter_scans/start expects exactly 2.
+                # Normalize defensively so the monitor does not crash on boot.
+                original_get_health = lidar.get_health
+
+                def _safe_get_health():
+                    out = original_get_health()
+                    if isinstance(out, tuple):
+                        if len(out) >= 2:
+                            return out[0], out[1]
+                    status = getattr(out, "status", None)
+                    error_code = getattr(out, "error_code", 0)
+                    return status, error_code
+
+                lidar.get_health = _safe_get_health
                 with self._lock:
                     self.connected_port = port
                     self.last_error = None
@@ -219,18 +241,28 @@ class LidarSafetyMonitor:
                         "front_left": None,
                         "back_left": None,
                     }
+                    zone_sums: Dict[str, float] = {name: 0.0 for name in zone_mins}
+                    zone_counts: Dict[str, int] = {name: 0 for name in zone_mins}
 
                     def update_zone(name: str, distance: float):
                         current = zone_mins[name]
                         if current is None or distance < current:
                             zone_mins[name] = distance
+                        zone_sums[name] += float(distance)
+                        zone_counts[name] += 1
+
+                    def zone_avgs() -> Dict[str, Optional[float]]:
+                        return {
+                            name: (zone_sums[name] / zone_counts[name] if zone_counts[name] else None)
+                            for name in zone_mins
+                        }
 
                     meas_count = 0
                     for _quality, angle, distance in scan:
                         if distance <= 0:
                             continue
                         meas_count += 1
-                        a = int(angle) % 360
+                        a = (int(angle) + self.angle_offset_deg) % 360
                         if any(_in_zone(a, z) for z in self.ignore_zones):
                             continue
 
@@ -263,9 +295,9 @@ class LidarSafetyMonitor:
                             self.partial_update_every_meas > 0
                             and (meas_count % self.partial_update_every_meas) == 0
                         ):
-                            self._set_status_fast_block(front_min, rear_min, zone_mins)
+                            self._set_status_fast_block(front_min, rear_min, zone_mins, zone_avgs())
 
-                    self._set_status(front_min, rear_min, zone_mins)
+                    self._set_status(front_min, rear_min, zone_mins, zone_avgs())
 
             except Exception as ex:
                 with self._lock:
@@ -297,9 +329,11 @@ class LidarSafetyMonitor:
                 "front_min_mm": self.front_min_mm,
                 "rear_min_mm": self.rear_min_mm,
                 "zone_mins_mm": dict(self.zone_mins_mm),
+                "zone_avgs_mm": dict(self.zone_avgs_mm),
                 "stop_mm": self.stop_mm,
                 "clear_scans_required": self.clear_scans_required,
                 "block_scans_required": self.block_scans_required,
+                "angle_offset_deg": self.angle_offset_deg,
                 "front_clear_scan_count": self._front_clear_scan_count,
                 "rear_clear_scan_count": self._rear_clear_scan_count,
                 "front_zones": self.front_zones,

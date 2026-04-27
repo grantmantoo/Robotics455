@@ -20,6 +20,47 @@ def normalize_destination(text):
     return None
 
 
+def is_dialog_command(text):
+    text = text.lower().strip()
+    if normalize_destination(text):
+        return True
+
+    command_phrases = [
+        "hello",
+        "hi",
+        "howdy",
+        "hi there",
+        "hey robot",
+        "yes",
+        "yeah",
+        "yep",
+        "sure",
+        "of course",
+        "no",
+        "nope",
+        "nah",
+        "no way",
+        "dance",
+        "boogie",
+        "do a dance",
+        "dance for me",
+        "arm",
+        "wave",
+        "raise your arm",
+        "raise arm",
+        "wave at me",
+        "thanks",
+        "thank you",
+        "bye",
+        "goodbye",
+        "stop",
+        "cancel",
+        "reset",
+        "quit",
+    ]
+    return any(phrase in text for phrase in command_phrases)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True, help="Robot Flask base URL, e.g. http://192.168.43.95:5000")
@@ -45,7 +86,7 @@ def main():
         audio_q.put(bytes(indata))
 
     print("Listening locally with Vosk.")
-    print("Say: bathroom, restroom, robot lab, or robotics lab.")
+    print("Say a destination or key dialog command like hello, dance, yes, no, wave, stop.")
     endpoint = args.server.rstrip("/") + "/api/dialog_input"
 
     print("Posting recognized commands to:", endpoint)
@@ -71,12 +112,15 @@ def main():
 
                     print("Heard:", text)
 
-                    destination_text = normalize_destination(text)
-                    if not destination_text:
-                        print("No destination keyword found.")
+                    if not is_dialog_command(text):
+                        print("No key dialog command found.")
                         continue
 
-                    print("Matched destination:", destination_text)
+                    destination_text = normalize_destination(text)
+                    if destination_text:
+                        print("Matched destination:", destination_text)
+                    else:
+                        print("Matched dialog command.")
 
                     try:
                         res = requests.post(

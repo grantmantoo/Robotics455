@@ -24,7 +24,17 @@ import time
 import os
 import random
 import argparse
+import base64
+import json
 from typing import Optional
+
+try:
+    from vosk import KaldiRecognizer, Model
+    VOSK_IMPORT_ERROR = None
+except Exception as _vosk_import_ex:
+    KaldiRecognizer = None
+    Model = None
+    VOSK_IMPORT_ERROR = str(_vosk_import_ex)
 
 class QuietHandler(WSGIRequestHandler):
     def log_request(self, code='-', size='-'):
@@ -58,17 +68,30 @@ FINAL_APPROACH_MIN_WAIT_S = 0.75
 FINAL_APPROACH_TIMEOUT_S = 60.0
 FINAL_TURN_SPEED = 1000
 FINAL_TURN_180_S = 1.60
-FINAL_TURN_90_S = 0.80
+FINAL_TURN_90_S = 0.60
 FINAL_FORWARD_SPEED = 900
-FINAL_SIDE_WALL_DETECT_MM = 1500
-FINAL_ALIGN_MIN_DRIVE_S = 1.2
-FINAL_ALIGN_CONFIRM_SCANS = 5
-FINAL_ALIGN_TIMEOUT_S = 12.0
+FINAL_LIDAR_RIGHT_OFFSET_MM = 300
+FINAL_HALL_WIDTH_MIN_MM = 2300
+FINAL_HALL_WIDTH_MAX_MM = 2850
+FINAL_SIDE_WALL_MAX_MM = 2200
+FINAL_BASELINE_SETTLE_S = 0.75
+FINAL_BASELINE_TIMEOUT_S = 4.0
+FINAL_BASELINE_SCANS = 6
+FINAL_BASELINE_STABILITY_MM = 50
+FINAL_ALIGN_CENTER_KP = 0.25
+FINAL_ALIGN_CENTER_MAX_STEER = 180
 FINAL_T_INTERSECTION_TIMEOUT_S = 45.0
-FINAL_FINISH_DRIVE_S = 5.0
-FINAL_OBSTACLE_STOP_MM = 900
-FINAL_OBSTACLE_CLEAR_MM = 1150
+FINAL_FINISH_DRIVE_S = 4.0
+FINAL_HALL_OBSTACLE_MM = 1000
+FINAL_HALL_CLEAR_SCANS = 4
 FINAL_ACK_PAUSE_S = 2.8
+FINAL_INTERSECTION_FRONT_MM = 3000
+FINAL_INTERSECTION_CONFIRM_SCANS = 3
+FINAL_INTERSECTION_SIDE_JUMP_MM = 450
+FINAL_INTERSECTION_HISTORY_SCANS = 3
+FINAL_T_APPROACH_STOP_MM = 1100
+FINAL_T_APPROACH_SPEED = 800
+FINAL_FRONT_LOG_PERIOD_S = 0.30
 
 _motion_lock = threading.Lock()
 _motion_left = 0
@@ -99,10 +122,27 @@ _final_demo_status = {
     "baseline_front_mm": None,
     "left_mm": None,
     "right_mm": None,
+    "hall_width_mm": None,
     "wall_state": None,
     "started_at": None,
     "updated_at": time.time(),
 }
+
+_tts_lock = threading.Lock()
+_tts_last_text = ""
+_tts_last_at = 0.0
+
+_browser_vosk_lock = threading.Lock()
+_browser_vosk_model = None
+_browser_vosk_recognizer = None
+_browser_vosk_active = False
+_browser_vosk_sample_rate = 16000
+_browser_vosk_last_partial = ""
+_browser_vosk_last_text = ""
+
+
+def _clamp(x: int | float, lo: int | float, hi: int | float):
+    return lo if x < lo else hi if x > hi else x
 
 
 def set_dialog_state(value: Optional[str]):
@@ -248,6 +288,26 @@ def _destination_from_text(text: str, explicit_destination: object = None) -> Op
     return None
 
 
+def _default_vosk_model_path() -> str:
+    return os.getenv(
+        "VOSK_MODEL_PATH",
+        os.path.join(os.path.dirname(__file__), "vosk-model-small-en-us-0.15"),
+    )
+
+
+def _ensure_browser_vosk_model():
+    global _browser_vosk_model
+    if Model is None:
+        raise RuntimeError(f"vosk import failed: {VOSK_IMPORT_ERROR}")
+    if _browser_vosk_model is not None:
+        return _browser_vosk_model
+    model_path = _default_vosk_model_path()
+    if not os.path.isdir(model_path):
+        raise RuntimeError(f"vosk model not found: {model_path}")
+    _browser_vosk_model = Model(model_path)
+    return _browser_vosk_model
+
+
 def _final_demo_is_waiting_for_destination() -> bool:
     with _final_demo_lock:
         return bool(_final_demo_status["active"] and _final_demo_status["state"] == "WAIT_DESTINATION")
@@ -270,6 +330,7 @@ def _reset_final_demo_status(message: str = "Final demo idle.") -> None:
                 "baseline_front_mm": None,
                 "left_mm": None,
                 "right_mm": None,
+                "hall_width_mm": None,
                 "wall_state": None,
                 "started_at": None,
                 "updated_at": time.time(),
@@ -326,27 +387,31 @@ def _final_turn_right(seconds: float, label: str) -> bool:
 
 def _final_front_obstacle(status: dict | None) -> bool:
     front_mm = _front_distance_from_lidar_status(status)
-    return bool(status and status.get("front_blocked")) or (
-        front_mm is not None and front_mm <= FINAL_OBSTACLE_STOP_MM
-    )
+    return bool(front_mm is not None and front_mm <= FINAL_HALL_OBSTACLE_MM)
 
 
 def _final_front_clear(status: dict | None) -> bool:
     front_mm = _front_distance_from_lidar_status(status)
-    return front_mm is None or front_mm >= FINAL_OBSTACLE_CLEAR_MM
+    return bool(front_mm is not None and front_mm > FINAL_HALL_OBSTACLE_MM)
 
 
 def _final_wait_front_clear() -> bool:
     _set_final_demo_state("OBSTACLE_WAIT", "Obstacle detected in front. Waiting until clear.")
+    clear_scans = 0
     while not _final_demo_cancel.is_set():
         status = lidar_monitor.status() if lidar_monitor is not None else {}
         front_mm = _front_distance_from_lidar_status(status)
+        if _final_front_clear(status):
+            clear_scans += 1
+        else:
+            clear_scans = 0
         _set_final_demo_state(
             "OBSTACLE_WAIT",
             "Obstacle detected in front. Waiting until clear.",
             front_mm=front_mm,
+            clear_scans=clear_scans,
         )
-        if _final_front_clear(status):
+        if clear_scans >= FINAL_HALL_CLEAR_SCANS:
             return True
         ctrl.stop()
         _clear_motion_command()
@@ -354,93 +419,309 @@ def _final_wait_front_clear() -> bool:
     return False
 
 
-def _final_drive_forward_until_side_walls() -> bool:
-    start = time.time()
-    aligned_scans = 0
-    _set_final_demo_state(
-        "ALIGN_HALLWAY",
-        f"Driving forward until both side walls are within {FINAL_SIDE_WALL_DETECT_MM} mm.",
+def _final_estimated_hall_width(left_mm: object, right_mm: object) -> Optional[float]:
+    if left_mm is None or right_mm is None:
+        return None
+    return float(left_mm) + float(right_mm) - float(FINAL_LIDAR_RIGHT_OFFSET_MM)
+
+
+def _final_hallway_aligned(left_mm: object, right_mm: object) -> tuple[bool, Optional[float]]:
+    width_mm = _final_estimated_hall_width(left_mm, right_mm)
+    if width_mm is None:
+        return False, None
+    both_walls_present = (
+        float(left_mm) <= FINAL_SIDE_WALL_MAX_MM
+        and float(right_mm) <= FINAL_SIDE_WALL_MAX_MM + FINAL_LIDAR_RIGHT_OFFSET_MM
     )
-    try:
-        while not _final_demo_cancel.is_set():
-            if time.time() - start > FINAL_ALIGN_TIMEOUT_S:
-                _set_final_demo_state("ALIGN_TIMEOUT", "Timed out before seeing both side walls.")
-                return False
+    width_ok = FINAL_HALL_WIDTH_MIN_MM <= width_mm <= FINAL_HALL_WIDTH_MAX_MM
+    return bool(both_walls_present and width_ok), width_mm
 
-            status = lidar_monitor.status() if lidar_monitor is not None else {}
-            if _final_front_obstacle(status):
-                ctrl.stop()
-                _clear_motion_command()
-                if not _final_wait_front_clear():
-                    return False
-                aligned_scans = 0
 
-            zone_mins = status.get("zone_mins_mm") or {}
-            left_mm = zone_mins.get("left")
-            right_mm = zone_mins.get("right")
-            front_mm = _front_distance_from_lidar_status(status)
-            elapsed = time.time() - start
-            sides_detected = (
-                left_mm is not None
-                and right_mm is not None
-                and float(left_mm) <= FINAL_SIDE_WALL_DETECT_MM
-                and float(right_mm) <= FINAL_SIDE_WALL_DETECT_MM
+def _final_t_opening_seen(
+    recent_left_mm: list[Optional[float]],
+    recent_right_mm: list[Optional[float]],
+    baseline_left_mm: object,
+    baseline_right_mm: object,
+) -> bool:
+    if baseline_left_mm is None or baseline_right_mm is None:
+        return False
+    left_jump = 0.0
+    right_jump = 0.0
+    for value in recent_left_mm:
+        if value is None:
+            continue
+        left_jump = max(left_jump, float(value) - float(baseline_left_mm))
+    for value in recent_right_mm:
+        if value is None:
+            continue
+        right_jump = max(right_jump, float(value) - float(baseline_right_mm))
+    total_jump = max(0.0, left_jump) + max(0.0, right_jump)
+    return total_jump >= float(FINAL_INTERSECTION_SIDE_JUMP_MM)
+
+
+def _final_capture_hallway_baseline() -> tuple[Optional[float], Optional[float], Optional[float]]:
+    _set_final_demo_state(
+        "LOCK_HALLWAY",
+        "Pausing after the turn to lock hallway wall distances.",
+    )
+    if not _sleep_with_final_cancel(FINAL_BASELINE_SETTLE_S):
+        return None, None, None
+
+    start = time.time()
+    left_samples = []
+    right_samples = []
+    running_left = None
+    running_right = None
+    while not _final_demo_cancel.is_set():
+        if time.time() - start > FINAL_BASELINE_TIMEOUT_S:
+            break
+        status = lidar_monitor.status() if lidar_monitor is not None else {}
+        zone_mins = status.get("zone_mins_mm") or {}
+        left_mm = zone_mins.get("left")
+        right_mm = zone_mins.get("right")
+        if left_mm is not None and right_mm is not None:
+            corrected_right_mm = float(right_mm) - float(FINAL_LIDAR_RIGHT_OFFSET_MM)
+            hall_width_mm = _final_estimated_hall_width(left_mm, right_mm)
+            both_walls_present = (
+                float(left_mm) <= FINAL_SIDE_WALL_MAX_MM
+                and float(right_mm) <= FINAL_SIDE_WALL_MAX_MM + FINAL_LIDAR_RIGHT_OFFSET_MM
             )
-            if elapsed >= FINAL_ALIGN_MIN_DRIVE_S and sides_detected:
-                aligned_scans += 1
-            else:
-                aligned_scans = 0
             _set_final_demo_state(
-                "ALIGN_HALLWAY",
-                "Driving forward until both side walls are detected.",
-                front_mm=front_mm,
+                "LOCK_HALLWAY",
+                "Pausing after the turn to lock hallway wall distances.",
                 left_mm=left_mm,
                 right_mm=right_mm,
+                hall_width_mm=hall_width_mm,
             )
-            if aligned_scans >= FINAL_ALIGN_CONFIRM_SCANS:
-                ctrl.stop_smooth()
-                _clear_motion_command()
-                _set_final_demo_state("HALLWAY_ALIGNED", "Both side walls detected.")
-                return True
+            if both_walls_present:
+                if running_left is None:
+                    running_left = float(left_mm)
+                    running_right = corrected_right_mm
+                    left_samples = [float(left_mm)]
+                    right_samples = [corrected_right_mm]
+                else:
+                    left_stable = abs(float(left_mm) - float(running_left)) <= FINAL_BASELINE_STABILITY_MM
+                    right_stable = abs(corrected_right_mm - float(running_right)) <= FINAL_BASELINE_STABILITY_MM
+                    if left_stable and right_stable:
+                        left_samples.append(float(left_mm))
+                        right_samples.append(corrected_right_mm)
+                        running_left = sum(left_samples) / len(left_samples)
+                        running_right = sum(right_samples) / len(right_samples)
+                    else:
+                        running_left = float(left_mm)
+                        running_right = corrected_right_mm
+                        left_samples = [float(left_mm)]
+                        right_samples = [corrected_right_mm]
+                if len(left_samples) >= FINAL_BASELINE_SCANS:
+                    baseline_left = sum(left_samples) / len(left_samples)
+                    baseline_right = sum(right_samples) / len(right_samples)
+                    return baseline_left, baseline_right, hall_width_mm
+        time.sleep(0.12)
+    return None, None, None
 
-            ctrl.drive_autonomous(FINAL_FORWARD_SPEED, FINAL_FORWARD_SPEED)
-            _set_motion_command(FINAL_FORWARD_SPEED, FINAL_FORWARD_SPEED)
-            if not _sleep_with_final_cancel(0.15):
-                return False
+
+def _final_alignment_drive_command(
+    left_mm: object,
+    right_mm: object,
+    baseline_left_mm: object,
+    baseline_right_mm: object,
+) -> tuple[int, int]:
+    if left_mm is None or right_mm is None or baseline_left_mm is None or baseline_right_mm is None:
+        return FINAL_FORWARD_SPEED, FINAL_FORWARD_SPEED
+
+    corrected_right_mm = float(right_mm) - float(FINAL_LIDAR_RIGHT_OFFSET_MM)
+    target_center_error = float(baseline_right_mm) - float(baseline_left_mm)
+    center_error = (corrected_right_mm - float(left_mm)) - target_center_error
+    steer = int(round(center_error * FINAL_ALIGN_CENTER_KP))
+    steer = int(_clamp(steer, -FINAL_ALIGN_CENTER_MAX_STEER, FINAL_ALIGN_CENTER_MAX_STEER))
+    left_cmd = int(_clamp(FINAL_FORWARD_SPEED + steer, 700, 1200))
+    right_cmd = int(_clamp(FINAL_FORWARD_SPEED - steer, 700, 1200))
+    return left_cmd, right_cmd
+
+
+def _final_looks_like_t_intersection(
+    front_mm: object,
+    recent_left_mm: list[Optional[float]],
+    recent_right_mm: list[Optional[float]],
+    baseline_left_mm: object,
+    baseline_right_mm: object,
+) -> bool:
+    if front_mm is None:
         return False
-    finally:
-        ctrl.stop()
-        _clear_motion_command()
+    return (
+        float(front_mm) <= FINAL_INTERSECTION_FRONT_MM
+        and _final_t_opening_seen(recent_left_mm, recent_right_mm, baseline_left_mm, baseline_right_mm)
+    )
 
 
-def _final_wall_follow_until_t_intersection() -> bool:
+def _final_drive_centered_until_t_intersection(
+    baseline_left_mm: float,
+    baseline_right_mm: float,
+) -> bool:
     start = time.time()
-    _start_final_right_wall_follow()
+    intersection_scans = 0
+    approach_t_latched = False
+    hall_obstacle_waiting = False
+    hall_clear_scans = 0
+    last_front_log_at = 0.0
+    recent_left_mm: list[Optional[float]] = []
+    recent_right_mm: list[Optional[float]] = []
     while not _final_demo_cancel.is_set():
         if time.time() - start > FINAL_T_INTERSECTION_TIMEOUT_S:
             _set_final_demo_state("T_TIMEOUT", "Timed out before detecting the T-intersection.")
             return False
 
-        status = wall_follower.status() if wall_follower is not None else {}
-        _set_final_demo_state(
-            "WALL_FOLLOW_TO_T",
-            "Wall following until T-intersection is detected.",
-            wall_state=status.get("last_state"),
+        status = lidar_monitor.status() if lidar_monitor is not None else {}
+        zone_mins = status.get("zone_mins_mm") or {}
+        left_mm = zone_mins.get("left")
+        right_mm = zone_mins.get("right")
+        front_mm = _front_distance_from_lidar_status(status)
+        hallway_aligned, hall_width_mm = _final_hallway_aligned(left_mm, right_mm)
+        corrected_right_mm = (
+            float(right_mm) - float(FINAL_LIDAR_RIGHT_OFFSET_MM)
+            if right_mm is not None
+            else None
         )
-        if status.get("last_intersection_detected") or status.get("last_state") == "T_INTERSECTION_DETECTED":
-            _stop_wall_follower_if_active("final demo T-intersection detected")
+        recent_left_mm.append(float(left_mm) if left_mm is not None else None)
+        recent_right_mm.append(corrected_right_mm)
+        if len(recent_left_mm) > FINAL_INTERSECTION_HISTORY_SCANS:
+            recent_left_mm.pop(0)
+        if len(recent_right_mm) > FINAL_INTERSECTION_HISTORY_SCANS:
+            recent_right_mm.pop(0)
+
+        t_opening_seen = _final_t_opening_seen(
+            recent_left_mm,
+            recent_right_mm,
+            baseline_left_mm,
+            baseline_right_mm,
+        )
+        looks_like_t = _final_looks_like_t_intersection(
+            front_mm,
+            recent_left_mm,
+            recent_right_mm,
+            baseline_left_mm,
+            baseline_right_mm,
+        )
+        if looks_like_t:
+            intersection_scans += 1
+        else:
+            intersection_scans = 0
+        if intersection_scans >= FINAL_INTERSECTION_CONFIRM_SCANS:
+            approach_t_latched = True
+
+        left_jump_log = 0.0
+        right_jump_log = 0.0
+        for value in recent_left_mm:
+            if value is not None:
+                left_jump_log = max(left_jump_log, float(value) - float(baseline_left_mm))
+        for value in recent_right_mm:
+            if value is not None:
+                right_jump_log = max(right_jump_log, float(value) - float(baseline_right_mm))
+        total_jump_log = max(0.0, left_jump_log) + max(0.0, right_jump_log)
+
+        if not approach_t_latched:
+            if front_mm is not None and float(front_mm) <= FINAL_HALL_OBSTACLE_MM:
+                hall_obstacle_waiting = True
+                hall_clear_scans = 0
+            elif hall_obstacle_waiting:
+                if front_mm is not None and float(front_mm) > FINAL_HALL_OBSTACLE_MM:
+                    hall_clear_scans += 1
+                else:
+                    hall_clear_scans = 0
+
+        now = time.time()
+        if (now - last_front_log_at) >= FINAL_FRONT_LOG_PERIOD_S:
+            print(
+                f"[FINAL FRONT] state={'APPROACH_T' if approach_t_latched else 'CENTER_TO_T'} "
+                f"front_mm={front_mm} left_mm={left_mm} right_mm={right_mm} "
+                f"baseline_left_mm={round(float(baseline_left_mm), 1) if baseline_left_mm is not None else None} "
+                f"baseline_right_mm={round(float(baseline_right_mm), 1) if baseline_right_mm is not None else None} "
+                f"total_side_jump_mm={round(total_jump_log, 1)} "
+                f"t_confirm_scans={intersection_scans}"
+            )
+            last_front_log_at = now
+
+        _set_final_demo_state(
+            "CENTER_TO_T",
+            "Driving centered down the hallway toward the T-intersection.",
+            front_mm=front_mm,
+            left_mm=left_mm,
+            right_mm=right_mm,
+            hall_width_mm=hall_width_mm,
+            baseline_left_mm=baseline_left_mm,
+            baseline_right_mm=baseline_right_mm,
+        )
+
+        # During hallway centering, obstacle wait is owned directly here:
+        # once latched, do not issue any more wheel commands until we see
+        # four explicit front readings above the threshold.
+        if hall_obstacle_waiting and not approach_t_latched:
             ctrl.stop()
             _clear_motion_command()
-            _set_final_demo_state("T_INTERSECTION", "T-intersection detected.")
-            return True
-        time.sleep(0.2)
+            _set_final_demo_state(
+                "OBSTACLE_WAIT",
+                "Obstacle detected in front. Waiting until clear.",
+                front_mm=front_mm,
+                left_mm=left_mm,
+                right_mm=right_mm,
+                hall_width_mm=hall_width_mm,
+                clear_scans=hall_clear_scans,
+            )
+            if hall_clear_scans >= FINAL_HALL_CLEAR_SCANS:
+                hall_obstacle_waiting = False
+                hall_clear_scans = 0
+            else:
+                time.sleep(0.12)
+                continue
+
+        if approach_t_latched:
+            hall_obstacle_waiting = False
+            hall_clear_scans = 0
+
+        if approach_t_latched:
+            _set_final_demo_state(
+                "APPROACH_T",
+                "Hallway opened on both sides. Approaching the T wall.",
+                front_mm=front_mm,
+                left_mm=left_mm,
+                right_mm=right_mm,
+                hall_width_mm=hall_width_mm,
+                baseline_left_mm=baseline_left_mm,
+                baseline_right_mm=baseline_right_mm,
+            )
+            if front_mm is not None and float(front_mm) <= FINAL_T_APPROACH_STOP_MM:
+                ctrl.stop()
+                _clear_motion_command()
+                _set_final_demo_state(
+                    "T_INTERSECTION",
+                    f"Reached the front wall at the T-intersection at {round(float(front_mm), 1) if front_mm is not None else 'n/a'} mm.",
+                    front_mm=front_mm,
+                    left_mm=left_mm,
+                    right_mm=right_mm,
+                    hall_width_mm=hall_width_mm,
+                    baseline_left_mm=baseline_left_mm,
+                    baseline_right_mm=baseline_right_mm,
+                )
+                return True
+
+            ctrl.drive_autonomous(FINAL_T_APPROACH_SPEED, FINAL_T_APPROACH_SPEED)
+            _set_motion_command(FINAL_T_APPROACH_SPEED, FINAL_T_APPROACH_SPEED)
+            if not _sleep_with_final_cancel(0.10):
+                return False
+            continue
+
+        left_cmd, right_cmd = _final_alignment_drive_command(left_mm, right_mm, baseline_left_mm, baseline_right_mm)
+        ctrl.drive_autonomous(left_cmd, right_cmd)
+        _set_motion_command(left_cmd, right_cmd)
+        if not _sleep_with_final_cancel(0.12):
+            return False
     return False
 
 
 def _final_decision_turn(destination: str) -> bool:
     if destination == "bathroom":
-        return _final_turn_right(FINAL_TURN_90_S, "TURN_RIGHT_TO_BATHROOM")
-    return _final_turn_left(FINAL_TURN_90_S, "TURN_LEFT_TO_ROBOT_LAB")
+        return _final_turn_left(FINAL_TURN_90_S, "TURN_LEFT_TO_BATHROOM")
+    return _final_turn_right(FINAL_TURN_90_S, "TURN_RIGHT_TO_ROBOT_LAB")
 
 
 def _final_drive_forward_for_finish() -> bool:
@@ -493,6 +774,7 @@ def _start_final_right_wall_follow() -> None:
         if key not in cfg:
             continue
         start_kwargs[key] = cfg[key]
+    start_kwargs["stop_at_t_intersection"] = True
     wall_follower.start(**start_kwargs)
     _set_final_demo_state(
         "WALL_FOLLOW_RIGHT",
@@ -507,6 +789,40 @@ def _final_destination_ack(destination: str) -> str:
     if destination == "bathroom":
         return "Sure, I will take you to the bathroom. Follow me."
     return f"Sure, I will take you to the {destination}. Follow me."
+
+
+def _run_goon_sequence() -> None:
+    if _final_demo_is_active():
+        _cancel_final_demo("goon sequence")
+    _stop_wall_follower_if_active("goon sequence")
+    if action_runner is not None:
+        action_runner.interrupt()
+
+    _clear_motion_command()
+    ctrl.stop()
+
+    try:
+        ctrl.turn_left(FINAL_TURN_SPEED)
+        _set_motion_command(-FINAL_TURN_SPEED, FINAL_TURN_SPEED)
+        time.sleep(FINAL_TURN_180_S)
+    finally:
+        ctrl.stop()
+        _clear_motion_command()
+
+    tilt_min, tilt_max = getattr(ctrl, "SERVO_LIMITS", {}).get("head_tilt", (4000, 8000))
+    elbow_min, elbow_max = getattr(ctrl, "SERVO_LIMITS", {}).get("right_elbow_ud", (7000, 8000))
+
+    ctrl.head_tilt(tilt_min)
+    speak_async("Oh yeah")
+
+    hold_s = 0.35
+    for _ in range(5):
+        ctrl.right_elbow_ud(elbow_max)
+        time.sleep(hold_s)
+        ctrl.right_elbow_ud(elbow_min)
+        time.sleep(hold_s)
+
+    ctrl.right_elbow_ud(elbow_min)
 
 
 def _final_demo_wait_for_approach() -> bool:
@@ -592,9 +908,18 @@ def _final_demo_navigation_worker(destination: str) -> None:
             return
         if not _final_turn_left(FINAL_TURN_180_S, "TURN_180"):
             return
-        if not _final_drive_forward_until_side_walls():
+        baseline_left_mm, baseline_right_mm, hall_width_mm = _final_capture_hallway_baseline()
+        if baseline_left_mm is None or baseline_right_mm is None:
+            _set_final_demo_state("ALIGN_TIMEOUT", "Could not lock hallway wall distances after the turn.")
             return
-        if not _final_wall_follow_until_t_intersection():
+        _set_final_demo_state(
+            "HALLWAY_LOCKED",
+            "Hallway wall distances locked after the turn.",
+            baseline_left_mm=baseline_left_mm,
+            baseline_right_mm=baseline_right_mm,
+            hall_width_mm=hall_width_mm,
+        )
+        if not _final_drive_centered_until_t_intersection(baseline_left_mm, baseline_right_mm):
             return
         if not _final_decision_turn(destination):
             return
@@ -699,6 +1024,12 @@ def lidar_motion_guard_loop():
         time.sleep(LIDAR_MOTION_GUARD_PERIOD_S)
         if lidar_monitor is None:
             continue
+        if _final_demo_is_active():
+            # The final demo owns its own front-obstacle logic and wait states.
+            # Skip the generic guard here so it does not fight the demo loop
+            # with a different threshold and then allow the demo loop to
+            # re-issue drive commands immediately after.
+            continue
 
         left, right, active = _get_motion_command()
         if not active:
@@ -715,8 +1046,8 @@ def lidar_motion_guard_loop():
 
         direction = "forward" if linear > 0 else "backward"
         try:
-            ctrl.stop_smooth()
             _clear_motion_command()
+            ctrl.stop()
             print(
                 f"[LIDAR SAFETY] forced stop while moving direction={direction} "
                 f"left={left} right={right}"
@@ -741,12 +1072,134 @@ def sanitize_tts(text: str) -> str:
     return text
 
 def speak_async(text: str):
+    global _tts_last_text, _tts_last_at
+    text = sanitize_tts(text)
+    if not text:
+        return
+    with _tts_lock:
+        now = time.time()
+        if text == _tts_last_text and (now - _tts_last_at) < 2.0:
+            print(f"[TTS] suppressed duplicate: {text}")
+            return
+        _tts_last_text = text
+        _tts_last_at = now
+
     def run():
         try:
             subprocess.run(["espeak-ng", "-s", "165", "-v", "en-us", text], check=False)
         except FileNotFoundError:
             print(f"[TTS WARN] espeak-ng not installed; cannot speak: {text}")
     threading.Thread(target=run, daemon=True).start()
+
+
+def _process_dialog_text(text: str, source: str = "browser", explicit_destination: object = None):
+    touch_heartbeat()
+    if dialog_engine is None:
+        return {"ok": False, "error": "dialog engine not configured"}, 500
+
+    if not isinstance(text, str):
+        return {"ok": False, "error": "text must be a string"}, 400
+    text = sanitize_tts(text)
+    if not text:
+        return {"ok": False, "error": "text is empty"}, 400
+
+    destination = _destination_from_text(text, explicit_destination)
+    final_destination_waiting = bool(destination and _final_demo_is_waiting_for_destination())
+
+    if final_destination_waiting:
+        response = {
+            "ok": True,
+            "input": text,
+            "matched": True,
+            "reply": "",
+            "actions": [],
+            "state": get_dialog_state(),
+            "scope_depth": dialog_engine.current_scope_depth(),
+            "source": source,
+            "destination": destination,
+            "final_triggered": True,
+        }
+        _set_final_demo_state(
+            "NAV_QUEUED",
+            f"Destination heard: {destination}. Starting navigation.",
+            destination=destination,
+            active=True,
+        )
+        _final_demo_cancel.clear()
+        threading.Thread(
+            target=_final_demo_navigation_worker,
+            args=(destination,),
+            daemon=True,
+        ).start()
+        _store_dialog_event(response)
+        print(f"[FINAL] accepted destination while waiting: {text!r} -> {destination}")
+        return response, 200
+
+    if _final_demo_is_active():
+        response = {
+            "ok": True,
+            "input": text,
+            "matched": False,
+            "reply": "",
+            "actions": [],
+            "state": get_dialog_state(),
+            "scope_depth": dialog_engine.current_scope_depth(),
+            "source": source,
+            "destination": destination,
+            "final_triggered": False,
+            "ignored": True,
+            "ignore_reason": "final demo already navigating",
+        }
+        _store_dialog_event(response)
+        print(f"[FINAL] ignored speech while navigating: {text!r}")
+        return response, 200
+
+    _stop_wall_follower_if_active("dialog input")
+
+    try:
+        ctrl.stop()
+        _clear_motion_command()
+    except Exception as ex:
+        print(f"[DIALOG] deadman stop failed: {ex}")
+
+    with dialog_lock:
+        result = dialog_engine.handle_input(text)
+
+    if not result.get("ok", False):
+        return result, 400
+
+    if result.get("interrupt", False):
+        if action_runner is not None:
+            action_runner.interrupt()
+        try:
+            ctrl.stop()
+            _clear_motion_command()
+        except Exception as ex:
+            print(f"[DIALOG] stop failed on interrupt: {ex}")
+
+    speak_text = result.get("speak_text", "")
+    if isinstance(speak_text, str) and speak_text:
+        speak_async(speak_text)
+
+    actions = result.get("actions", [])
+    if isinstance(actions, list) and actions and action_runner is not None:
+        set_dialog_state("EXEC_ACTIONS")
+        action_runner.enqueue(actions)
+
+    response = {
+        "ok": True,
+        "input": text,
+        "matched": result.get("matched", False),
+        "reply": speak_text,
+        "actions": actions,
+        "state": get_dialog_state(),
+        "scope_depth": dialog_engine.current_scope_depth(),
+        "source": source,
+        "destination": destination,
+        "final_triggered": False,
+    }
+    _store_dialog_event(response)
+    return response, 200
 
 
 DEFAULT_DIALOG_SCRIPT = os.path.join(os.path.dirname(__file__), "testDialogFileForPractice.txt")
@@ -1226,6 +1679,111 @@ def api_dialog_last():
     return jsonify({"ok": True, "dialog": _get_dialog_event()})
 
 
+@app.route("/api/browser_vosk/start", methods=["POST"])
+def api_browser_vosk_start():
+    data = request.get_json(silent=True) or {}
+    sample_rate = int(data.get("sample_rate", 16000))
+    try:
+        model = _ensure_browser_vosk_model()
+    except Exception as ex:
+        return bad(str(ex), code=500)
+
+    global _browser_vosk_recognizer, _browser_vosk_active, _browser_vosk_sample_rate
+    global _browser_vosk_last_partial, _browser_vosk_last_text
+    with _browser_vosk_lock:
+        _browser_vosk_sample_rate = sample_rate
+        _browser_vosk_recognizer = KaldiRecognizer(model, sample_rate)
+        _browser_vosk_recognizer.SetWords(False)
+        _browser_vosk_active = True
+        _browser_vosk_last_partial = ""
+        _browser_vosk_last_text = ""
+    print(f"[VOSK] browser stream started sample_rate={sample_rate}")
+    return jsonify({"ok": True, "speech": {"active": True, "sample_rate": sample_rate}})
+
+
+@app.route("/api/browser_vosk/chunk", methods=["POST"])
+def api_browser_vosk_chunk():
+    data = request.get_json(silent=True) or {}
+    audio_b64 = data.get("audio_b64", "")
+    if not isinstance(audio_b64, str) or not audio_b64:
+        return bad("audio_b64 is required")
+
+    with _browser_vosk_lock:
+        recognizer = _browser_vosk_recognizer
+        active = _browser_vosk_active
+    if not active or recognizer is None:
+        return bad("browser vosk is not active", code=409)
+
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+    except Exception:
+        return bad("invalid base64 audio")
+
+    if not audio_bytes:
+        return bad("empty audio chunk")
+
+    response = {"ok": True, "heard": False}
+    with _browser_vosk_lock:
+        if recognizer.AcceptWaveform(audio_bytes):
+            result = json.loads(recognizer.Result())
+            text = sanitize_tts(result.get("text", ""))
+            _browser_vosk_last_partial = ""
+            if text:
+                _browser_vosk_last_text = text
+                dialog_response, dialog_code = _process_dialog_text(
+                    text,
+                    source="browser_vosk",
+                    explicit_destination=_destination_from_text(text),
+                )
+                response.update(
+                    {
+                        "heard": True,
+                        "final": True,
+                        "text": text,
+                        "dialog": dialog_response,
+                        "dialog_status": dialog_code,
+                    }
+                )
+            else:
+                response.update({"final": True, "text": ""})
+        else:
+            partial = json.loads(recognizer.PartialResult()).get("partial", "")
+            partial = sanitize_tts(partial)
+            _browser_vosk_last_partial = partial
+            response.update({"final": False, "partial": partial})
+    return jsonify(response)
+
+
+@app.route("/api/browser_vosk/stop", methods=["POST"])
+def api_browser_vosk_stop():
+    global _browser_vosk_recognizer, _browser_vosk_active, _browser_vosk_last_partial
+    with _browser_vosk_lock:
+        _browser_vosk_recognizer = None
+        _browser_vosk_active = False
+        _browser_vosk_last_partial = ""
+    print("[VOSK] browser stream stopped")
+    return jsonify({"ok": True, "speech": {"active": False}})
+
+
+@app.route("/api/browser_vosk/status", methods=["GET"])
+def api_browser_vosk_status():
+    with _browser_vosk_lock:
+        return jsonify(
+            {
+                "ok": True,
+                "speech": {
+                    "active": _browser_vosk_active,
+                    "sample_rate": _browser_vosk_sample_rate,
+                    "partial": _browser_vosk_last_partial,
+                    "last_text": _browser_vosk_last_text,
+                    "model_path": _default_vosk_model_path(),
+                    "available": Model is not None,
+                    "import_error": VOSK_IMPORT_ERROR,
+                },
+            }
+        )
+
+
 @app.route("/api/lidar_status", methods=["GET"])
 def api_lidar_status():
     if lidar_monitor is None:
@@ -1299,6 +1857,16 @@ def api_final_status():
     )
 
 
+@app.route("/api/goon", methods=["POST"])
+def api_goon():
+    touch_heartbeat()
+    try:
+        threading.Thread(target=_run_goon_sequence, daemon=True).start()
+    except Exception as ex:
+        return bad(f"goon failed: {ex}", code=500)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/wall_follow/start", methods=["POST"])
 def api_wall_follow_start():
     global wall_follower
@@ -1329,6 +1897,11 @@ def api_wall_follow_start():
             default = cfg[key]
             if key == "side":
                 start_kwargs[key] = str(raw).lower().strip()
+            elif isinstance(default, bool):
+                if isinstance(raw, str):
+                    start_kwargs[key] = raw.lower().strip() in ("1", "true", "yes", "on")
+                else:
+                    start_kwargs[key] = bool(raw)
             elif isinstance(default, float):
                 start_kwargs[key] = float(raw)
             else:
@@ -1370,105 +1943,13 @@ def api_wall_follow_status():
 
 @app.route("/api/dialog_input", methods=["POST"])
 def api_dialog_input():
-    touch_heartbeat()
-    if dialog_engine is None:
-        return bad("dialog engine not configured", code=500)
-
     data = request.get_json(silent=True) or {}
-    text = data.get("text", "")
-    source = data.get("source", "browser")
-    if not isinstance(text, str):
-        return bad("text must be a string")
-    text = sanitize_tts(text)
-    if not text:
-        return bad("text is empty")
-    destination = _destination_from_text(text, data.get("destination"))
-    final_destination_waiting = bool(destination and _final_demo_is_waiting_for_destination())
-
-    if _final_demo_is_active() and not final_destination_waiting:
-        response = {
-            "ok": True,
-            "input": text,
-            "matched": False,
-            "reply": "",
-            "actions": [],
-            "state": get_dialog_state(),
-            "scope_depth": dialog_engine.current_scope_depth(),
-            "source": source,
-            "destination": destination,
-            "final_triggered": False,
-            "ignored": True,
-            "ignore_reason": "final demo already navigating",
-        }
-        _store_dialog_event(response)
-        print(f"[FINAL] ignored speech while navigating: {text!r}")
-        return jsonify(response)
-
-    _stop_wall_follower_if_active("dialog input")
-
-    # Wheel deadman: any non-final dialog input immediately stops wheel motion,
-    # even if wheels were started by manual drive controls.
-    try:
-        ctrl.stop()
-        _clear_motion_command()
-    except Exception as ex:
-        print(f"[DIALOG] deadman stop failed: {ex}")
-
-    with dialog_lock:
-        result = dialog_engine.handle_input(text)
-
-    if not result.get("ok", False):
-        return jsonify(result), 400
-
-    if result.get("interrupt", False):
-        if action_runner is not None:
-            action_runner.interrupt()
-        try:
-            ctrl.stop()
-            _clear_motion_command()
-        except Exception as ex:
-            print(f"[DIALOG] stop failed on interrupt: {ex}")
-
-    speak_text = result.get("speak_text", "")
-    if isinstance(speak_text, str) and speak_text and not final_destination_waiting:
-        speak_async(speak_text)
-
-    actions = result.get("actions", [])
-    if isinstance(actions, list) and actions and action_runner is not None:
-        # Set immediately so API/UI shows EXEC_ACTIONS without worker timing delay.
-        set_dialog_state("EXEC_ACTIONS")
-        action_runner.enqueue(actions)
-
-    final_triggered = False
-    if final_destination_waiting:
-        final_triggered = True
-        _set_final_demo_state(
-            "NAV_QUEUED",
-            f"Destination heard: {destination}. Starting navigation.",
-            destination=destination,
-            active=True,
-        )
-        _final_demo_cancel.clear()
-        threading.Thread(
-            target=_final_demo_navigation_worker,
-            args=(destination,),
-            daemon=True,
-        ).start()
-
-    response = {
-        "ok": True,
-        "input": text,
-        "matched": result.get("matched", False),
-        "reply": speak_text,
-        "actions": actions,
-        "state": get_dialog_state(),
-        "scope_depth": dialog_engine.current_scope_depth(),
-        "source": source,
-        "destination": destination,
-        "final_triggered": final_triggered,
-    }
-    _store_dialog_event(response)
-    return jsonify(response)
+    response, code = _process_dialog_text(
+        data.get("text", ""),
+        source=data.get("source", "browser"),
+        explicit_destination=data.get("destination"),
+    )
+    return jsonify(response), code
 
 
 if __name__ == "__main__":
@@ -1496,6 +1977,12 @@ if __name__ == "__main__":
         default=int(os.getenv("LIDAR_STOP_MM", "800")),
         help="Stop distance threshold in mm",
     )
+    parser.add_argument(
+        "--lidar-angle-offset",
+        type=int,
+        default=int(os.getenv("LIDAR_ANGLE_OFFSET_DEG", "0")),
+        help="Rotate lidar angles into robot coordinates (+/- degrees)",
+    )
     args = parser.parse_args()
 
     # Start lidar monitor before serving requests (if module is available).
@@ -1504,12 +1991,14 @@ if __name__ == "__main__":
             port=args.lidar_port,
             stop_mm=args.lidar_stop_mm,
             clear_scans_required=LIDAR_CLEAR_SCANS_REQUIRED,
+            angle_offset_deg=args.lidar_angle_offset,
         )
         lidar_monitor.start()
         wall_follower = WallFollower(ctrl, lidar_monitor)
         print(
             f"[LIDAR] monitor started port={args.lidar_port} stop_mm={args.lidar_stop_mm} "
-            f"clear_scans_required={LIDAR_CLEAR_SCANS_REQUIRED}"
+            f"clear_scans_required={LIDAR_CLEAR_SCANS_REQUIRED} "
+            f"angle_offset_deg={args.lidar_angle_offset}"
         )
     else:
         print(f"[LIDAR WARN] lidar monitor disabled (import failed): {LIDAR_IMPORT_ERROR}")

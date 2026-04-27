@@ -21,6 +21,7 @@ WALL_FOLLOW_CONFIG_FIELDS = (
     "dist_kp",
     "heading_kp",
     "turn_deadband",
+    "track_slew_step",
     "search_delta",
     "wheel_step_min",
     "corner_turn_boost",
@@ -41,33 +42,45 @@ WALL_FOLLOW_CONFIG_FIELDS = (
     "intersection_open_mm",
     "intersection_confirm_scans",
     "lost_wall_mm",
+    "stop_at_t_intersection",
     "reverse_time_s",
     "turn_time_s",
+    "corner_deadzone_s",
+    "pivot_speed_scale",
+    "tight_corner_inner_scale",
+    "reverse_speed_scale",
+    "front_clear_buffer_mm",
+    "front_pivot_max_s",
+    "front_recover_forward_s",
+    "front_recover_reverse_s",
+    "front_recover_pivot_scale",
+    "front_recover_turn_s",
 )
 
 _FINAL_DEMO_BASE_PROFILE = {
     "target_mm": 900,
-    "tolerance_mm": 160,
+    "tolerance_mm": 100,
     "base_speed": 1000,
-    "correction_band": 220,
+    "correction_band": 180,
     "steer_delta": 260,
     "steer_min": 80,
-    "steer_max": 210,
+    "steer_max": 150,
     "steer_kp": 0.25,
-    "turn_gain": 1.30,
-    "dist_kp": 0.12,
-    "heading_kp": 0.42,
-    "turn_deadband": 2,
-    "search_delta": 140,
+    "turn_gain": 0.90,
+    "dist_kp": 0.075,
+    "heading_kp": 0.26,
+    "turn_deadband": 6,
+    "track_slew_step": 30,
+    "search_delta": 100,
     "wheel_step_min": 15,
     "corner_turn_boost": 0.80,
-    "corner_jump_factor": 1.35,
-    "front_stop_mm": 380,
+    "corner_jump_factor": 1.80,
+    "front_stop_mm": 500,
     "front_emergency_mm": 280,
-    "front_slow_mm": 950,
+    "front_slow_mm": 1200,
     "front_min_scale": 0.25,
-    "front_turn_start_mm": 1400,
-    "front_turn_full_mm": 800,
+    "front_turn_start_mm": 1700,
+    "front_turn_full_mm": 950,
     "front_turn_max": 1000,
     "front_turn_center_weight": 0.65,
     "front_turn_curve": 2.0,
@@ -78,19 +91,30 @@ _FINAL_DEMO_BASE_PROFILE = {
     "intersection_open_mm": 2200,
     "intersection_confirm_scans": 3,
     "lost_wall_mm": 2300,
-    "reverse_time_s": 0.30,
-    "turn_time_s": 0.65,
+    "stop_at_t_intersection": False,
+    "reverse_time_s": 0.90,
+    "turn_time_s": 0.85,
+    "corner_deadzone_s": 0.35,
+    "pivot_speed_scale": 0.50,
+    "tight_corner_inner_scale": 0.10,
+    "reverse_speed_scale": 0.72,
+    "front_clear_buffer_mm": 300,
+    "front_pivot_max_s": 2.80,
+    "front_recover_forward_s": 0.60,
+    "front_recover_reverse_s": 2.40,
+    "front_recover_pivot_scale": 1.00,
+    "front_recover_turn_s": 1.10,
 }
 
 _CAUTIOUS_BASE_PROFILE = {
     **_FINAL_DEMO_BASE_PROFILE,
     "target_mm": 1000,
-    "tolerance_mm": 180,
+    "tolerance_mm": 110,
     "correction_band": 180,
-    "steer_max": 170,
-    "turn_gain": 1.15,
-    "heading_kp": 0.35,
-    "search_delta": 110,
+    "steer_max": 125,
+    "turn_gain": 0.80,
+    "heading_kp": 0.20,
+    "search_delta": 85,
     "front_turn_max": 850,
 }
 
@@ -157,16 +181,17 @@ class WallFollower:
         self.dist_kp = 0.12
         self.heading_kp = 0.35
         self.turn_deadband = 2
+        self.track_slew_step = 20
         self.search_delta = 120
         self.wheel_step_min = 10
         self.corner_turn_boost = 0.75
         self.corner_jump_factor = 1.40
-        self.front_stop_mm = 320
+        self.front_stop_mm = 420
         self.front_emergency_mm = 300
-        self.front_slow_mm = 800
+        self.front_slow_mm = 1000
         self.front_min_scale = 0.30
-        self.front_turn_start_mm = 1400
-        self.front_turn_full_mm = 800
+        self.front_turn_start_mm = 1600
+        self.front_turn_full_mm = 900
         self.front_turn_max = 1100
         self.front_turn_center_weight = 0.65
         self.front_turn_curve = 2.2
@@ -177,13 +202,29 @@ class WallFollower:
         self.intersection_open_mm = 2200
         self.intersection_confirm_scans = 3
         self.lost_wall_mm = 2400
+        self.stop_at_t_intersection = False
         self.loop_period_s = 0.06
-        self.reverse_time_s = 0.35
+        self.reverse_time_s = 0.90
         self.turn_time_s = 0.65
+        self.corner_deadzone_s = 0.35
+        self.pivot_speed_scale = 0.50
+        self.tight_corner_inner_scale = 0.10
+        self.reverse_speed_scale = 0.72
+        self.front_clear_buffer_mm = 300
+        self.front_pivot_max_s = 2.80
+        self.front_recover_forward_s = 0.60
+        self.front_recover_reverse_s = 2.40
+        self.front_recover_pivot_scale = 1.00
+        self.front_recover_turn_s = 1.10
         self._last_recovery_turn = "left"
         self._last_error_mm: Optional[float] = None
+        self._last_track_cmd = 0
         self._prev_side_dist_mm: Optional[float] = None
+        self._prev_raw_side_dist_mm: Optional[float] = None
         self._intersection_scan_count = 0
+        self._corner_deadzone_until = 0.0
+        self._outside_corner_armed = False
+        self._outside_corner_arm_time = 0.0
 
         # Status
         self.active = False
@@ -200,27 +241,28 @@ class WallFollower:
         self,
         side: str = "right",
         target_mm: int = 900,
-        tolerance_mm: int = 160,
+        tolerance_mm: int = 100,
         base_speed: int = 1000,
-        correction_band: int = 220,
+        correction_band: int = 180,
         steer_delta: int = 260,
         steer_min: int = 80,
-        steer_max: int = 210,
+        steer_max: int = 150,
         steer_kp: float = 0.25,
-        turn_gain: float = 1.30,
-        dist_kp: float = 0.12,
-        heading_kp: float = 0.42,
-        turn_deadband: int = 2,
-        search_delta: int = 140,
+        turn_gain: float = 0.90,
+        dist_kp: float = 0.075,
+        heading_kp: float = 0.26,
+        turn_deadband: int = 6,
+        track_slew_step: int = 30,
+        search_delta: int = 100,
         wheel_step_min: int = 15,
         corner_turn_boost: float = 0.80,
-        corner_jump_factor: float = 1.35,
-        front_stop_mm: int = 380,
+        corner_jump_factor: float = 1.80,
+        front_stop_mm: int = 500,
         front_emergency_mm: int = 280,
-        front_slow_mm: int = 950,
+        front_slow_mm: int = 1200,
         front_min_scale: float = 0.25,
-        front_turn_start_mm: int = 1400,
-        front_turn_full_mm: int = 800,
+        front_turn_start_mm: int = 1700,
+        front_turn_full_mm: int = 950,
         front_turn_max: int = 1000,
         front_turn_center_weight: float = 0.65,
         front_turn_curve: float = 2.0,
@@ -231,8 +273,19 @@ class WallFollower:
         intersection_open_mm: int = 2200,
         intersection_confirm_scans: int = 3,
         lost_wall_mm: int = 2300,
-        reverse_time_s: float = 0.30,
-        turn_time_s: float = 0.65,
+        stop_at_t_intersection: bool = False,
+        reverse_time_s: float = 0.90,
+        turn_time_s: float = 0.85,
+        corner_deadzone_s: float = 0.35,
+        pivot_speed_scale: float = 0.50,
+        tight_corner_inner_scale: float = 0.10,
+        reverse_speed_scale: float = 0.72,
+        front_clear_buffer_mm: int = 300,
+        front_pivot_max_s: float = 2.80,
+        front_recover_forward_s: float = 0.60,
+        front_recover_reverse_s: float = 2.40,
+        front_recover_pivot_scale: float = 1.00,
+        front_recover_turn_s: float = 1.10,
     ) -> None:
         side = side.lower().strip()
         if side not in ("left", "right"):
@@ -248,10 +301,11 @@ class WallFollower:
             self.steer_min = int(steer_min)
             self.steer_max = min(int(steer_max), self.correction_band)
             self.steer_kp = float(steer_kp)
-            self.turn_gain = max(1.0, float(turn_gain))
+            self.turn_gain = max(0.1, float(turn_gain))
             self.dist_kp = float(dist_kp)
             self.heading_kp = float(heading_kp)
             self.turn_deadband = max(0, int(turn_deadband))
+            self.track_slew_step = max(1, int(track_slew_step))
             self.search_delta = min(int(search_delta), self.correction_band)
             self.wheel_step_min = max(0, int(wheel_step_min))
             self.corner_turn_boost = _clamp(int(corner_turn_boost * 100), 50, 100) / 100.0
@@ -275,11 +329,27 @@ class WallFollower:
             self.intersection_open_mm = max(self.target_mm + 500, int(intersection_open_mm))
             self.intersection_confirm_scans = max(1, int(intersection_confirm_scans))
             self.lost_wall_mm = int(lost_wall_mm)
+            self.stop_at_t_intersection = bool(stop_at_t_intersection)
             self.reverse_time_s = float(reverse_time_s)
             self.turn_time_s = float(turn_time_s)
+            self.corner_deadzone_s = max(0.0, float(corner_deadzone_s))
+            self.pivot_speed_scale = _clamp(int(float(pivot_speed_scale) * 100), 25, 100) / 100.0
+            self.tight_corner_inner_scale = _clamp(int(float(tight_corner_inner_scale) * 100), 0, 50) / 100.0
+            self.reverse_speed_scale = _clamp(int(float(reverse_speed_scale) * 100), 35, 100) / 100.0
+            self.front_clear_buffer_mm = max(50, int(front_clear_buffer_mm))
+            self.front_pivot_max_s = max(0.2, float(front_pivot_max_s))
+            self.front_recover_forward_s = max(0.0, float(front_recover_forward_s))
+            self.front_recover_reverse_s = max(0.2, float(front_recover_reverse_s))
+            self.front_recover_pivot_scale = _clamp(int(float(front_recover_pivot_scale) * 100), 35, 100) / 100.0
+            self.front_recover_turn_s = max(0.2, float(front_recover_turn_s))
             self._last_error_mm = None
+            self._last_track_cmd = 0
             self._prev_side_dist_mm = None
+            self._prev_raw_side_dist_mm = None
             self._intersection_scan_count = 0
+            self._corner_deadzone_until = 0.0
+            self._outside_corner_armed = False
+            self._outside_corner_arm_time = 0.0
             self.last_intersection_detected = False
 
         if self._thread and self._thread.is_alive():
@@ -439,23 +509,155 @@ class WallFollower:
     def _wall_lost(self, distance_mm: Optional[float]) -> bool:
         return not self._has_wall(distance_mm)
 
+    def _wall_seen_recently(self, distance_mm: Optional[float]) -> bool:
+        return distance_mm is not None and float(distance_mm) <= float(self.lost_wall_mm * 0.75)
+
     def _turn_direction_away_from_followed_wall(self) -> str:
         return "left" if self.side == "right" else "right"
 
     def _turn_direction_toward_followed_wall(self) -> str:
         return "right" if self.side == "right" else "left"
 
-    def _issue_pivot(self, direction: str, state: str) -> None:
+    def _issue_pivot(self, direction: str, state: str, speed_scale: Optional[float] = None) -> None:
+        scale = self.pivot_speed_scale if speed_scale is None else float(speed_scale)
+        speed = int(_clamp(round(self.base_speed * scale), 300, self.base_speed))
         if direction == "right":
-            self._issue_drive(self.base_speed, -self.base_speed, state)
+            self._issue_drive(speed, -speed, state)
         else:
-            self._issue_drive(-self.base_speed, self.base_speed, state)
+            self._issue_drive(-speed, speed, state)
+
+    def _current_front_distance(self) -> Optional[float]:
+        status = self.lidar.status()
+        zone_mins = status.get("zone_mins_mm", {}) or {}
+        front = zone_mins.get("front_center")
+        if front is None:
+            front = zone_mins.get("front")
+        return float(front) if front is not None else None
+
+    def _back_up_briefly(self, duration_s: Optional[float] = None) -> None:
+        end = time.time() + (self.reverse_time_s if duration_s is None else float(duration_s))
+        speed = int(_clamp(round(self.base_speed * self.reverse_speed_scale), 450, self.base_speed))
+        while time.time() < end and not self._stop_evt.is_set():
+            self._issue_drive(-speed, -speed, "FRONT_WALL_BACKUP")
+            time.sleep(self.loop_period_s)
+
+    def _drive_forward_briefly(self, state: str) -> None:
+        end = time.time() + self.front_recover_forward_s
+        while time.time() < end and not self._stop_evt.is_set():
+            self._issue_forward_drive(self.base_speed, self.base_speed, None, state)
+            time.sleep(self.loop_period_s)
+
+    def _issue_tight_corner_turn(self, direction: str, state: str) -> None:
+        outer = self.base_speed
+        inner = int(_clamp(round(self.base_speed * self.tight_corner_inner_scale), 0, self.base_speed))
+        if direction == "right":
+            self._issue_drive(outer, inner, state)
+        else:
+            self._issue_drive(inner, outer, state)
+
+    def _commit_tight_corner_turn(self, direction: str, state: str) -> None:
+        self._last_recovery_turn = direction
+        self._prev_side_dist_mm = None
+        self._last_track_cmd = 0
+        self._issue_tight_corner_turn(direction, state)
+        time.sleep(self.turn_time_s)
+        self._corner_deadzone_until = time.time() + self.corner_deadzone_s
 
     def _commit_corner_turn(self, direction: str, state: str) -> None:
         self._last_recovery_turn = direction
         self._prev_side_dist_mm = None
+        self._last_track_cmd = 0
         self._issue_pivot(direction, state)
         time.sleep(self.turn_time_s)
+        self._corner_deadzone_until = time.time() + self.corner_deadzone_s
+
+    def _recover_from_front_wall(self, direction: str, state: str) -> None:
+        self._issue_drive(0, 0, "FRONT_WALL_STOP")
+        time.sleep(0.05)
+
+        # Suspend normal wall-follow behavior while this scripted recovery
+        # sequence executes.
+        self._corner_deadzone_until = (
+            time.time()
+            + self.front_recover_reverse_s
+            + self.front_recover_turn_s
+            + self.front_recover_forward_s
+        )
+        self._back_up_briefly(self.front_recover_reverse_s)
+
+        self._last_recovery_turn = direction
+        self._prev_side_dist_mm = None
+        self._last_track_cmd = 0
+        turn_end = time.time() + min(self.front_recover_turn_s, self.front_pivot_max_s)
+        while time.time() < turn_end and not self._stop_evt.is_set():
+            self._issue_pivot(direction, state, self.front_recover_pivot_scale)
+            time.sleep(self.loop_period_s)
+
+        self._drive_forward_briefly("FRONT_WALL_RECOVER_FORWARD")
+        self._issue_drive(0, 0, "FRONT_WALL_RECOVERED")
+        self._corner_deadzone_until = time.time() + self.corner_deadzone_s
+
+    def _in_corner_deadzone(self) -> bool:
+        return time.time() < self._corner_deadzone_until
+
+    def _follow_distance(self, side_mm: Optional[float]) -> Optional[float]:
+        return float(side_mm) if side_mm is not None else None
+
+    def _slew_track_cmd(self, target_cmd: int) -> int:
+        lo = self._last_track_cmd - self.track_slew_step
+        hi = self._last_track_cmd + self.track_slew_step
+        cmd = int(_clamp(int(target_cmd), lo, hi))
+        self._last_track_cmd = cmd
+        return cmd
+
+    def _inside_corner_detected(self, front_mm: Optional[float], front_side_mm: Optional[float]) -> bool:
+        return (
+            front_mm is not None
+            and float(front_mm) <= float(self.front_turn_start_mm)
+            and (
+                front_side_mm is None
+                or float(front_side_mm) <= float(self.front_turn_start_mm)
+            )
+        )
+
+    def _outside_corner_detected(
+        self,
+        side_mm: Optional[float],
+        front_side_mm: Optional[float],
+        back_side_mm: Optional[float],
+    ) -> bool:
+        return (
+            self._wall_lost(side_mm)
+            and self._wall_lost(front_side_mm)
+            and self._has_wall(back_side_mm)
+        )
+
+    def _outside_corner_arm_detected(
+        self,
+        side_mm: Optional[float],
+        front_side_mm: Optional[float],
+        back_side_mm: Optional[float],
+    ) -> bool:
+        return (
+            self._wall_lost(front_side_mm)
+            and self._has_wall(back_side_mm)
+        )
+
+    def _raw_side_jump(self, side_mm: Optional[float]) -> Optional[float]:
+        if side_mm is None or self._prev_raw_side_dist_mm is None:
+            return None
+        return float(side_mm) - float(self._prev_raw_side_dist_mm)
+
+    def _outside_corner_pivot_ready(self, side_mm: Optional[float], raw_side_jump: Optional[float]) -> bool:
+        if not self._outside_corner_armed:
+            return False
+        if time.time() - self._outside_corner_arm_time > 3.0:
+            self._outside_corner_armed = False
+            return False
+        if self._wall_lost(side_mm):
+            return True
+        jump_threshold = max(300.0, float(self.tolerance_mm) * 1.5)
+        return raw_side_jump is not None and raw_side_jump >= jump_threshold
 
     def _compose_track_drive(self, turn_cmd: int) -> tuple[int, int]:
         cmd = int(_clamp(turn_cmd, -1600, 1600))
@@ -496,126 +698,103 @@ class WallFollower:
             try:
                 s = self.lidar.status()
                 z = s.get("zone_mins_mm", {}) or {}
+                za = s.get("zone_avgs_mm", {}) or {}
                 front = z.get("front_center")
                 if front is None:
                     front = z.get("front")
-                front_left = z.get("front_left")
-                front_right = z.get("front_right")
-                back_left = z.get("back_left")
-                back_right = z.get("back_right")
-                left_dist = z.get("left")
-                right_dist = z.get("right")
+                front_left = za.get("front_left")
+                front_right = za.get("front_right")
+                back_left = za.get("back_left")
+                back_right = za.get("back_right")
+                left_dist = za.get("left")
+                right_dist = za.get("right")
+                if front_left is None:
+                    front_left = z.get("front_left")
+                if front_right is None:
+                    front_right = z.get("front_right")
+                if back_left is None:
+                    back_left = z.get("back_left")
+                if back_right is None:
+                    back_right = z.get("back_right")
+                if left_dist is None:
+                    left_dist = z.get("left")
+                if right_dist is None:
+                    right_dist = z.get("right")
                 side_key = "right" if self.side == "right" else "left"
-                side_dist = z.get(side_key)
+                side_dist = za.get(side_key)
+                if side_dist is None:
+                    side_dist = z.get(side_key)
                 if self.side == "right":
-                    front_side = front_right
-                    back_side = back_right
+                    front_side = za.get("front_right")
+                    back_side = za.get("back_right")
                 else:
-                    front_side = front_left
-                    back_side = back_left
-                front_effective = self._effective_front_distance(front, front_left, front_right)
-                front_corner = front_left
-                if front_corner is None or (front_right is not None and float(front_right) < float(front_corner)):
-                    front_corner = front_right
+                    front_side = za.get("front_left")
+                    back_side = za.get("back_left")
+                if front_side is None:
+                    front_side = front_right if self.side == "right" else front_left
+                if back_side is None:
+                    back_side = back_right if self.side == "right" else back_left
+                follow_dist = self._follow_distance(side_dist)
 
                 self.last_front_mm = front
-                self.last_side_mm = side_dist
+                self.last_side_mm = follow_dist
                 self.last_left_mm = left_dist
                 self.last_right_mm = right_dist
 
-                if self._looks_like_t_intersection(front_effective, left_dist, right_dist):
+                if self.stop_at_t_intersection and self._looks_like_t_intersection(front, left_dist, right_dist):
                     self.last_intersection_detected = True
                     self._issue_drive(0, 0, "T_INTERSECTION_DETECTED")
-                    self._log_cycle(left_dist, right_dist, side_dist, front)
+                    self._log_cycle(left_dist, right_dist, follow_dist, front)
                     time.sleep(self.loop_period_s)
                     continue
 
                 self.last_intersection_detected = False
+                in_corner_deadzone = self._in_corner_deadzone()
+                raw_side_jump = self._raw_side_jump(side_dist)
+                if side_dist is not None:
+                    self._prev_raw_side_dist_mm = float(side_dist)
 
-                # Global emergency override only for imminent collision.
-                if front_effective is not None and front_effective < self.front_emergency_mm:
-                    self._issue_drive(-self.base_speed, -self.base_speed, "FRONT_EMERGENCY_REVERSE")
-                    self._log_cycle(left_dist, right_dist, side_dist, front)
-                    time.sleep(self.reverse_time_s)
-                    if self._stop_evt.is_set():
-                        break
-
-                    left_open = float(front_left) if front_left is not None else -1.0
-                    right_open = float(front_right) if front_right is not None else -1.0
-                    if right_open > left_open:
-                        turn_dir = "right"
-                    elif left_open > right_open:
-                        turn_dir = "left"
-                    else:
-                        turn_dir = self._last_recovery_turn
-
-                    self._last_recovery_turn = turn_dir
-                    if turn_dir == "right":
-                        self._issue_drive(self.base_speed, -self.base_speed, "FRONT_EMERGENCY_TURN_RIGHT")
-                    else:
-                        self._issue_drive(-self.base_speed, self.base_speed, "FRONT_EMERGENCY_TURN_LEFT")
-                    self._log_cycle(left_dist, right_dist, side_dist, front)
-                    time.sleep(self.turn_time_s)
-                    continue
-
-                # Human/obstacle pause for the final demo: stop and wait instead
-                # of trying to slide around a person standing in the hallway.
-                if self._front_obstacle_waiting(front_effective):
-                    self._issue_drive(0, 0, "FRONT_OBSTACLE_WAIT")
-                    self._log_cycle(left_dist, right_dist, side_dist, front)
-                    time.sleep(self.loop_period_s)
-                    continue
-
-                # Front stop fallback only when side wall data is unavailable.
+                # Front wall: use only the center/front LIDAR zones and turn
+                # away from the wall side being followed.
                 if (
-                    (side_dist is None or side_dist > self.lost_wall_mm)
-                    and front_effective is not None
-                    and front_effective < self.front_stop_mm
+                    not in_corner_deadzone
+                    and self._inside_corner_detected(front, front_side)
                 ):
-                    # Perpendicular-wall recovery:
-                    # 1) back up briefly
-                    # 2) commit to one turn direction (prefer open side)
-                    self._issue_drive(-self.base_speed, -self.base_speed, "FRONT_BLOCKED_REVERSE")
-                    self._log_cycle(left_dist, right_dist, side_dist, front)
-                    time.sleep(self.reverse_time_s)
-                    if self._stop_evt.is_set():
-                        break
-
-                    left_open = float(front_left) if front_left is not None else -1.0
-                    right_open = float(front_right) if front_right is not None else -1.0
-                    if right_open > left_open:
-                        turn_dir = "right"
-                    elif left_open > right_open:
-                        turn_dir = "left"
-                    else:
-                        # Tie/unknown: keep previous commit to avoid flip-flop.
-                        turn_dir = self._last_recovery_turn
-
-                    self._last_recovery_turn = turn_dir
-                    if turn_dir == "right":
-                        self._issue_drive(self.base_speed, -self.base_speed, "FRONT_BLOCKED_TURN_RIGHT")
-                    else:
-                        self._issue_drive(-self.base_speed, self.base_speed, "FRONT_BLOCKED_TURN_LEFT")
-                    self._log_cycle(left_dist, right_dist, side_dist, front)
-                    time.sleep(self.turn_time_s)
+                    if self.stop_at_t_intersection:
+                        self._issue_drive(0, 0, "FRONT_OBSTACLE_WAIT")
+                        self._log_cycle(left_dist, right_dist, follow_dist, front)
+                        time.sleep(self.loop_period_s)
+                        continue
+                    turn_dir = self._turn_direction_away_from_followed_wall()
+                    state = "FRONT_WALL_TURN_LEFT" if turn_dir == "left" else "FRONT_WALL_TURN_RIGHT"
+                    self._recover_from_front_wall(turn_dir, state)
+                    self._log_cycle(left_dist, right_dist, follow_dist, front)
                     continue
 
                 # Outside corner: the wall is no longer visible at the side or
                 # front-side zones, but the back-side zone still sees it. Pivot
                 # toward the followed wall so the robot wraps around the corner.
                 if (
-                    self._wall_lost(side_dist)
-                    and self._wall_lost(front_side)
-                    and self._has_wall(back_side)
+                    not in_corner_deadzone
+                    and self._outside_corner_pivot_ready(side_dist, raw_side_jump)
                 ):
                     turn_dir = self._turn_direction_toward_followed_wall()
                     state = "LOST_WALL_TURN_RIGHT" if turn_dir == "right" else "LOST_WALL_TURN_LEFT"
-                    self._commit_corner_turn(turn_dir, state)
-                    self._log_cycle(left_dist, right_dist, side_dist, front)
+                    self._outside_corner_armed = False
+                    self._commit_tight_corner_turn(turn_dir, state)
+                    self._log_cycle(left_dist, right_dist, follow_dist, front)
                     continue
+                if (
+                    not in_corner_deadzone
+                    and not self._outside_corner_armed
+                    and self._outside_corner_arm_detected(side_dist, front_side, back_side)
+                ):
+                    self._outside_corner_armed = True
+                    self._outside_corner_arm_time = time.time()
 
-                # Case 4: wall lost/open -> gentle search toward wall side.
-                if self._wall_lost(side_dist):
+                # Wall lost/open without a clear back-side corner reading:
+                # gently search toward the followed wall.
+                if self._wall_lost(follow_dist):
                     steer = int(_clamp(round(self.search_delta * self.turn_gain), self.steer_min, self.correction_band))
                     if self.side == "right":
                         self._issue_forward_drive(
@@ -631,46 +810,52 @@ class WallFollower:
                             front,
                             "SEARCH_LEFT_COMMIT",
                         )
-                    self._log_cycle(left_dist, right_dist, side_dist, front)
+                    self._log_cycle(left_dist, right_dist, follow_dist, front)
                     time.sleep(self.loop_period_s)
                     continue
 
-                # Continuous wall control (distance + heading):
-                # toward_cmd > 0 means "turn toward followed wall"
-                # heading_err = front_side - back_side:
-                #   positive -> nose points away from wall (should turn toward wall)
-                dist_err = float(side_dist) - float(self.target_mm)
+                # Continuous wall control priority:
+                # 1) direct side distance decides toward/away from wall.
+                # 2) only inside the distance band do front/back side averages
+                #    straighten the robot angle relative to the wall.
+                dist_err = float(follow_dist) - float(self.target_mm)
                 heading_err = 0.0
                 if front_side is not None and back_side is not None:
                     heading_err = float(front_side) - float(back_side)
 
-                toward_cmd = (self.dist_kp * dist_err) + (self.heading_kp * heading_err)
+                if dist_err > self.tolerance_mm:
+                    toward_cmd = self.steer_min + self.dist_kp * (dist_err - self.tolerance_mm)
+                elif dist_err < -self.tolerance_mm:
+                    toward_cmd = -(self.steer_min + self.dist_kp * ((-dist_err) - self.tolerance_mm))
+                else:
+                    toward_cmd = self.heading_kp * heading_err
+
                 toward_cmd *= self.turn_gain
                 toward_cmd = _clamp(int(round(toward_cmd)), -self.steer_max, self.steer_max)
                 if abs(toward_cmd) <= self.turn_deadband:
                     toward_cmd = 0
-
-                front_turn_bias = self._front_turn_bias(front_effective, front_side, front_corner)
-                if front_turn_bias > 0:
-                    toward_cmd = min(toward_cmd, -front_turn_bias)
+                toward_cmd = self._slew_track_cmd(toward_cmd)
 
                 # Corner boost: if side distance jumps by more than target in one cycle,
                 # force a strong turn to account for sharp corners.
                 corner_triggered = False
                 if self._prev_side_dist_mm is not None:
-                    side_jump = float(side_dist) - float(self._prev_side_dist_mm)
+                    side_jump = float(follow_dist) - float(self._prev_side_dist_mm)
                     jump_trigger = float(self.target_mm) * self.corner_jump_factor
-                    if side_jump > jump_trigger:
+                    if side_jump > jump_trigger and not in_corner_deadzone:
                         # Sudden opening on followed side -> turn toward wall strongly.
-                        forced = int(round(self.steer_max * self.corner_turn_boost))
-                        toward_cmd = max(toward_cmd, forced)
-                        corner_triggered = True
+                        turn_dir = self._turn_direction_toward_followed_wall()
+                        state = "LOST_WALL_TURN_RIGHT" if turn_dir == "right" else "LOST_WALL_TURN_LEFT"
+                        self._outside_corner_armed = False
+                        self._commit_tight_corner_turn(turn_dir, state)
+                        self._log_cycle(left_dist, right_dist, follow_dist, front)
+                        continue
                     elif side_jump < -jump_trigger:
                         # Sudden closing on followed side -> turn away strongly.
                         forced = int(round(self.steer_max * self.corner_turn_boost))
                         toward_cmd = min(toward_cmd, -forced)
                         corner_triggered = True
-                self._prev_side_dist_mm = float(side_dist)
+                self._prev_side_dist_mm = float(follow_dist)
 
                 left_cmd, right_cmd = self._compose_track_drive(toward_cmd)
 
@@ -682,12 +867,14 @@ class WallFollower:
                     state = "TRACK_AWAY_FROM_WALL"
                 if corner_triggered:
                     state = f"{state}_CORNER_BOOST"
-                elif front_turn_bias > 0:
-                    state = f"{state}_FRONT_BIAS"
+                elif self._outside_corner_armed:
+                    state = f"{state}_CORNER_ARMED"
+                elif in_corner_deadzone:
+                    state = f"{state}_CORNER_DEADZONE"
 
-                self._issue_forward_drive(left_cmd, right_cmd, front_effective, state)
+                self._issue_forward_drive(left_cmd, right_cmd, front, state)
                 self._last_error_mm = dist_err
-                self._log_cycle(left_dist, right_dist, side_dist, front)
+                self._log_cycle(left_dist, right_dist, follow_dist, front)
 
             except Exception as ex:
                 self.last_state = f"ERROR: {ex}"
@@ -719,6 +906,7 @@ class WallFollower:
                 "dist_kp": self.dist_kp,
                 "heading_kp": self.heading_kp,
                 "turn_deadband": self.turn_deadband,
+                "track_slew_step": self.track_slew_step,
                 "search_delta": self.search_delta,
                 "wheel_step_min": self.wheel_step_min,
                 "corner_turn_boost": self.corner_turn_boost,
@@ -739,8 +927,19 @@ class WallFollower:
                 "intersection_open_mm": self.intersection_open_mm,
                 "intersection_confirm_scans": self.intersection_confirm_scans,
                 "lost_wall_mm": self.lost_wall_mm,
+                "stop_at_t_intersection": self.stop_at_t_intersection,
                 "reverse_time_s": self.reverse_time_s,
                 "turn_time_s": self.turn_time_s,
+                "corner_deadzone_s": self.corner_deadzone_s,
+                "pivot_speed_scale": self.pivot_speed_scale,
+                "tight_corner_inner_scale": self.tight_corner_inner_scale,
+                "reverse_speed_scale": self.reverse_speed_scale,
+                "front_clear_buffer_mm": self.front_clear_buffer_mm,
+                "front_pivot_max_s": self.front_pivot_max_s,
+                "front_recover_forward_s": self.front_recover_forward_s,
+                "front_recover_reverse_s": self.front_recover_reverse_s,
+                "front_recover_pivot_scale": self.front_recover_pivot_scale,
+                "front_recover_turn_s": self.front_recover_turn_s,
                 "loop_period_s": self.loop_period_s,
             }
         return {

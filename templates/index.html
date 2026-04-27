@@ -86,6 +86,7 @@
         <button onclick="post('/api/stop', {})">STOP</button>
         <button onclick="geekedPose()">Geeked</button>
         <button onclick="lockInPose()">Locked It</button>
+        <button onclick="startGoon()">Goon</button>
         <button onclick="post('/api/six_seven', {})">6-7</button>
       </div>
 
@@ -601,17 +602,20 @@
   }
 
   // ----------------------------------------
-  // Browser speech recognition -> dialog text
+  // Browser microphone -> Flask -> Vosk
   // ----------------------------------------
-  let speechRecognition = null;
   let speechActive = false;
   let speechShouldListen = false;
   let speechHasTranscript = false;
-  let speechRestartTimer = null;
-
-  function getSpeechRecognitionCtor() {
-    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
-  }
+  let speechStream = null;
+  let speechAudioContext = null;
+  let speechSourceNode = null;
+  let speechProcessorNode = null;
+  let speechChunkQueue = [];
+  let speechFlushTimer = null;
+  let speechSending = false;
+  let finalAutoListenArmed = false;
+  const SPEECH_TARGET_RATE = 16000;
 
   function setSpeechStatus(msg) {
     const el = document.getElementById("speechStatus");
@@ -625,131 +629,204 @@
     if (stopBtn) stopBtn.disabled = !listening;
   }
 
-  function initSpeechRecognition() {
-    if (speechRecognition) return speechRecognition;
-
-    const RecognitionCtor = getSpeechRecognitionCtor();
-    if (!RecognitionCtor) {
-      setSpeechStatus("Speech recognition is not supported in this browser. Try Chrome or Edge.");
-      return null;
+  function mergeSpeechChunks(chunks) {
+    let total = 0;
+    for (const chunk of chunks) total += chunk.length;
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
     }
-
-    const rec = new RecognitionCtor();
-    rec.lang = "en-US";
-    rec.continuous = false;
-    rec.interimResults = true;
-    rec.maxAlternatives = 1;
-
-    rec.onstart = () => {
-      speechActive = true;
-      setSpeechButtonState(true);
-      setSpeechStatus("Listening...");
-    };
-
-    rec.onresult = (event) => {
-      let finalTranscript = "";
-      let interimTranscript = "";
-
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const result = event.results[i];
-        const transcript = result[0].transcript.trim();
-        if (result.isFinal) {
-          finalTranscript += transcript;
-        } else {
-          interimTranscript += transcript;
-        }
-      }
-
-      const dialogInput = document.getElementById("dialogInput");
-      if (finalTranscript) {
-        speechHasTranscript = true;
-        dialogInput.value = finalTranscript;
-        setSpeechStatus("Heard: " + finalTranscript);
-        if (document.getElementById("speechAutoSend").checked) {
-          sendDialog();
-        }
-      } else if (interimTranscript) {
-        dialogInput.value = interimTranscript;
-        setSpeechStatus("Hearing: " + interimTranscript);
-      }
-    };
-
-    rec.onerror = (event) => {
-      const detail = event.error ? " (" + event.error + ")" : "";
-      if (event.error === "no-speech" && speechShouldListen) {
-        setSpeechStatus("Listening...");
-        return;
-      }
-      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-        speechShouldListen = false;
-      }
-      speechActive = false;
-      setSpeechStatus("Speech recognition error" + detail + ".");
-      setSpeechButtonState(speechShouldListen);
-    };
-
-    rec.onend = () => {
-      speechActive = false;
-      if (!speechShouldListen) {
-        setSpeechButtonState(false);
-        setSpeechStatus(speechHasTranscript ? "Listener stopped." : "Listening stopped.");
-        return;
-      }
-
-      setSpeechButtonState(true);
-      setSpeechStatus("Listening...");
-      if (speechRestartTimer) {
-        clearTimeout(speechRestartTimer);
-      }
-      speechRestartTimer = setTimeout(() => {
-        if (!speechShouldListen || speechActive) return;
-        try {
-          rec.start();
-        } catch (e) {
-          setSpeechStatus("Could not restart speech recognition: " + e);
-          speechShouldListen = false;
-          setSpeechButtonState(false);
-        }
-      }, 250);
-    };
-
-    speechRecognition = rec;
-    return speechRecognition;
+    return merged;
   }
 
-  function startSpeechRecognition() {
-    const rec = initSpeechRecognition();
-    if (!rec) return;
+  function downsampleToPcm16(float32Data, inputRate, outputRate) {
+    if (!float32Data || !float32Data.length) return new Uint8Array(0);
+    const ratio = inputRate / outputRate;
+    const outLength = Math.max(1, Math.round(float32Data.length / ratio));
+    const pcm = new Int16Array(outLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < outLength) {
+      const nextOffsetBuffer = Math.min(float32Data.length, Math.round((offsetResult + 1) * ratio));
+      let accum = 0;
+      let count = 0;
+      for (let i = offsetBuffer; i < nextOffsetBuffer; i += 1) {
+        accum += float32Data[i];
+        count += 1;
+      }
+      const sample = count ? (accum / count) : 0;
+      const clamped = Math.max(-1, Math.min(1, sample));
+      pcm[offsetResult] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+      offsetResult += 1;
+      offsetBuffer = nextOffsetBuffer;
+    }
+    return new Uint8Array(pcm.buffer);
+  }
+
+  function bytesToBase64(bytes) {
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode.apply(null, chunk);
+    }
+    return btoa(binary);
+  }
+
+  async function flushSpeechAudioQueue() {
+    if (speechSending || !speechShouldListen || !speechChunkQueue.length) return;
+    speechSending = true;
+    const merged = mergeSpeechChunks(speechChunkQueue);
+    speechChunkQueue = [];
+    try {
+      const res = await fetch("/api/browser_vosk/chunk", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ audio_b64: bytesToBase64(merged) })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        if (res.status === 409) {
+          setSpeechStatus("Speech listener disconnected. Start Listening or Start Demo again.");
+          speechShouldListen = false;
+          speechActive = false;
+          setSpeechButtonState(false);
+          return;
+        }
+        setSpeechStatus("Speech stream error: " + (data.error || "chunk failed"));
+        return;
+      }
+      if (data.heard && data.text) {
+        speechHasTranscript = true;
+        setSpeechStatus("Vosk heard: " + data.text);
+        if (data.dialog && data.dialog.final_triggered) {
+          setSpeechStatus("Destination locked. Listening stopped.");
+          await stopSpeechRecognition();
+          return;
+        }
+      } else if (data.partial) {
+        setSpeechStatus("Hearing: " + data.partial);
+      } else if (speechShouldListen) {
+        setSpeechStatus("Listening...");
+      }
+    } catch (e) {
+      setSpeechStatus("Speech stream error: " + e);
+    } finally {
+      speechSending = false;
+      if (speechShouldListen && speechChunkQueue.length) {
+        window.setTimeout(flushSpeechAudioQueue, 0);
+      }
+    }
+  }
+
+  async function startSpeechRecognition() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setSpeechStatus("Browser microphone capture is not supported here.");
+      return;
+    }
     speechShouldListen = true;
     setSpeechButtonState(true);
     if (speechActive) return;
     try {
       speechHasTranscript = false;
       document.getElementById("dialogInput").value = "";
-      setSpeechStatus("Starting microphone...");
-      rec.start();
+      setSpeechStatus("Starting microphone stream...");
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      speechStream = stream;
+
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) {
+        throw new Error("AudioContext is not available in this browser");
+      }
+      speechAudioContext = new AudioCtx();
+      if (speechAudioContext.state === "suspended") {
+        await speechAudioContext.resume();
+      }
+
+      await fetch("/api/browser_vosk/start", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ sample_rate: SPEECH_TARGET_RATE })
+      }).then(async (res) => {
+        const data = await res.json();
+        if (!data.ok) {
+          throw new Error(data.error || "could not start server speech listener");
+        }
+      });
+
+      speechSourceNode = speechAudioContext.createMediaStreamSource(stream);
+      speechProcessorNode = speechAudioContext.createScriptProcessor(4096, 1, 1);
+      speechProcessorNode.onaudioprocess = (event) => {
+        if (!speechShouldListen) return;
+        const input = event.inputBuffer.getChannelData(0);
+        const pcmBytes = downsampleToPcm16(input, speechAudioContext.sampleRate, SPEECH_TARGET_RATE);
+        if (!pcmBytes.length) return;
+        speechChunkQueue.push(pcmBytes);
+        if (speechChunkQueue.length >= 3) {
+          flushSpeechAudioQueue();
+        }
+      };
+      speechSourceNode.connect(speechProcessorNode);
+      speechProcessorNode.connect(speechAudioContext.destination);
+      if (speechFlushTimer) clearInterval(speechFlushTimer);
+      speechFlushTimer = setInterval(() => {
+        if (speechChunkQueue.length) flushSpeechAudioQueue();
+      }, 250);
+
+      speechActive = true;
+      setSpeechButtonState(true);
+      setSpeechStatus("Listening with browser mic, Vosk on Pi...");
     } catch (e) {
       setSpeechStatus("Could not start speech recognition: " + e);
       speechShouldListen = false;
       setSpeechButtonState(false);
+      stopSpeechRecognition();
     }
   }
 
-  function stopSpeechRecognition() {
+  async function stopSpeechRecognition() {
     speechShouldListen = false;
-    if (speechRestartTimer) {
-      clearTimeout(speechRestartTimer);
-      speechRestartTimer = null;
-    }
+    speechActive = false;
     setSpeechButtonState(false);
     setSpeechStatus("Listening stopped.");
-    if (!speechRecognition) return;
     try {
-      if (typeof speechRecognition.abort === "function") {
-        speechRecognition.abort();
-      } else {
-        speechRecognition.stop();
+      if (speechFlushTimer) {
+        clearInterval(speechFlushTimer);
+        speechFlushTimer = null;
       }
+      speechChunkQueue = [];
+      if (speechProcessorNode) {
+        speechProcessorNode.disconnect();
+        speechProcessorNode.onaudioprocess = null;
+        speechProcessorNode = null;
+      }
+      if (speechSourceNode) {
+        speechSourceNode.disconnect();
+        speechSourceNode = null;
+      }
+      if (speechStream) {
+        speechStream.getTracks().forEach((track) => track.stop());
+        speechStream = null;
+      }
+      if (speechAudioContext) {
+        await speechAudioContext.close();
+        speechAudioContext = null;
+      }
+      await fetch("/api/browser_vosk/stop", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+      });
     } catch (e) {
       setSpeechStatus("Could not stop speech recognition: " + e);
       setSpeechButtonState(false);
@@ -932,7 +1009,7 @@
       dialogInput.value = input;
     }
 
-    if (d.source === "vosk") {
+    if (d.source === "vosk" || d.source === "browser_vosk") {
       setSpeechStatus("Vosk heard: " + (input || "(empty)"));
     }
 
@@ -966,6 +1043,7 @@
     const baseline = f.baseline_front_mm != null ? Math.round(f.baseline_front_mm) : "n/a";
     const left = f.left_mm != null ? Math.round(f.left_mm) : "n/a";
     const right = f.right_mm != null ? Math.round(f.right_mm) : "n/a";
+    const hallWidth = f.hall_width_mm != null ? Math.round(f.hall_width_mm) : "n/a";
     const lidarFront = lidar.front_min_mm != null ? Math.round(lidar.front_min_mm) : "n/a";
     const out =
       "Active: " + Boolean(f.active) + "\n" +
@@ -974,11 +1052,19 @@
       "Destination: " + (f.destination || "(none)") + "\n" +
       "Approach front mm: " + front + " | baseline: " + baseline + "\n" +
       "Side walls mm: left=" + left + " right=" + right + "\n" +
+      "Estimated hall width mm: " + hallWidth + "\n" +
       "Wall-follow state: " + (f.wall_state || "(none)") + "\n" +
       "Current LIDAR front mm: " + lidarFront + "\n" +
       "Wall follower active: " + Boolean(wf.active) +
       (wf.last_state ? " | " + wf.last_state : "");
     document.getElementById("finalDemoOutput").textContent = out;
+
+    if (finalAutoListenArmed && f.state === "WAIT_DESTINATION" && !speechActive && !speechShouldListen) {
+      startSpeechRecognition();
+    }
+    if (!Boolean(f.active) && finalAutoListenArmed) {
+      finalAutoListenArmed = false;
+    }
   }
 
   async function startFinalDemo() {
@@ -995,8 +1081,9 @@
         return;
       }
       setStatus("ok: /api/final/start");
+      finalAutoListenArmed = true;
       renderFinalStatus({final: data.final});
-      setSpeechStatus("Final demo armed. Local Vosk should be running on the laptop.");
+      setSpeechStatus("Final demo armed. Microphone will start after the greeting.");
     } catch (e) {
       setStatus("ERROR: " + e);
     }
@@ -1016,7 +1103,30 @@
         return;
       }
       setStatus("ok: /api/final/stop");
+      finalAutoListenArmed = false;
       renderFinalStatus({final: data.final});
+      if (speechActive || speechShouldListen) {
+        await stopSpeechRecognition();
+      }
+    } catch (e) {
+      setStatus("ERROR: " + e);
+    }
+  }
+
+  async function startGoon() {
+    try {
+      setStatus("sending /api/goon ...");
+      const res = await fetch("/api/goon", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatus("ERROR: " + (data.error || "goon failed"));
+        return;
+      }
+      setStatus("ok: /api/goon");
     } catch (e) {
       setStatus("ERROR: " + e);
     }
